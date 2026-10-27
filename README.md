@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# Biz Trade Mart — Buyer MVP Frontend
 
-## Getting Started
+An original, responsive buyer-facing marketplace preview built on the repository's existing Next.js 13 App Router, React 18, TypeScript and Tailwind setup. It uses original Biz Trade Mart branding and sample marketplace data; it does not use competitor branding or source code.
 
-First, run the development server:
+## Included in this MVP skeleton
+
+- Branded responsive header with product search and category navigation.
+- Homepage hero, category directory and sample product cards.
+- Search by product, category, specification or supplier, plus category filtering.
+- Product detail route with specifications, supplier link and enquiry CTA.
+- Supplier profile route with sample business details and that supplier's listings.
+- Mobile, tablet and desktop styling.
+- Enquiry form UI placeholder. OTP verification, enquiry storage, real supplier verification, authentication and messaging are not connected.
+
+## Reusable components and data
+
+- `components/site-header.tsx` — marketplace header, search and navigation.
+- `components/product-card.tsx` — reusable listing card used on the home, product and supplier pages.
+- `data/catalog.ts` — typed category, product and supplier sample records and lookup helpers.
+- `app/page.tsx` — searchable/category-filtered buyer homepage.
+- `app/products/[slug]/page.tsx` — product detail and enquiry CTA.
+- `app/suppliers/[slug]/page.tsx` — supplier profile and supplier listings.
+
+A product record includes a stable `slug`, display name, category, sample price and unit, MOQ, five specification strings, description, visual token, and supplier references. Supplier records contain a stable slug, display name, initials, location, description, experience label and specialties. Replace these preview records with API/database data in a later backend phase.
+
+## Run locally
+
+Requirements: Node.js 18.17 or later and npm.
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build check
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+```bash
+npm run build
+```
 
-## Learn More
+The search form uses URL query parameters (for example `/?q=solar`); category links use `/?category=Packaging#products`. Product pages use `/products/<slug>`; supplier pages use `/suppliers/<slug>`.
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+All names, prices, supplier details and listings in `data/catalog.ts` are illustrative preview content. Do not treat them as verified offers or real supplier commitments.
