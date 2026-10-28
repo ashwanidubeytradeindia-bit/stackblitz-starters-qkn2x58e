@@ -10,12 +10,13 @@ An original, responsive buyer-facing marketplace preview built on the repository
 - Product detail route with specifications, supplier link and enquiry CTA.
 - Supplier profile route with sample business details and that supplier's listings.
 - Mobile, tablet and desktop styling.
-- Enquiry form UI placeholder. OTP verification, enquiry storage, real supplier verification, authentication and messaging are not connected.
+- Product enquiry flow with mobile number, demo OTP verification and enquiry details. It is client-side only; no OTP SMS is sent and enquiry data is not stored or delivered.
 
 ## Reusable components and data
 
 - `components/site-header.tsx` — marketplace header, search and navigation.
 - `components/product-card.tsx` — reusable listing card used on the home, product and supplier pages.
+- `components/enquiry-cta.tsx` — client-side mobile, demo OTP and enquiry detail flow.
 - `data/catalog.ts` — typed category, product and supplier sample records and lookup helpers.
 - `app/page.tsx` — searchable/category-filtered buyer homepage.
 - `app/products/[slug]/page.tsx` — product detail and enquiry CTA.
@@ -40,6 +41,6 @@ Open [http://localhost:3000](http://localhost:3000).
 npm run build
 ```
 
-The search form uses URL query parameters (for example `/?q=solar`); category links use `/?category=Packaging#products`. Product pages use `/products/<slug>`; supplier pages use `/suppliers/<slug>`.
+The enquiry UI validates a 10-digit Indian mobile number, advances through a demo OTP step (any six digits), collects enquiry details, and confirms the preview state locally. It does not send SMS or deliver/store the enquiry. The search form uses URL query parameters (for example `/?q=solar`); category links use `/?category=Packaging#products`. Product pages use `/products/<slug>`; supplier pages use `/suppliers/<slug>`.
 
 All names, prices, supplier details and listings in `data/catalog.ts` are illustrative preview content. Do not treat them as verified offers or real supplier commitments.
