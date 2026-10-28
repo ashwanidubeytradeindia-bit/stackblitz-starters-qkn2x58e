@@ -1,113 +1,77 @@
-import Image from 'next/image';
+import Link from 'next/link';
+import { ProductCard } from '@/components/product-card';
+import { SiteHeader } from '@/components/site-header';
+import { categories, products } from '@/data/catalog';
 
-export default function Home() {
+type HomeProps = { searchParams?: { q?: string; category?: string } };
+
+export default function Home({ searchParams = {} }: HomeProps) {
+  const query = (searchParams.q ?? '').trim().toLowerCase();
+  const selectedCategory = searchParams.category ?? '';
+  const visibleProducts = products.filter((product) => {
+    const matchesQuery = !query || [product.name, product.category, product.supplierName, ...product.specifications].join(' ').toLowerCase().includes(query);
+    const matchesCategory = !selectedCategory || product.category === selectedCategory;
+    return matchesQuery && matchesCategory;
+  });
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-24">
-      <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm lg:flex">
-        <p className="fixed left-0 top-0 flex w-full justify-center border-b border-gray-300 bg-gradient-to-b from-zinc-200 pb-6 pt-8 backdrop-blur-2xl dark:border-neutral-800 dark:bg-zinc-800/30 dark:from-inherit lg:static lg:w-auto  lg:rounded-xl lg:border lg:bg-gray-200 lg:p-4 lg:dark:bg-zinc-800/30">
-          Get started by editing&nbsp;
-          <code className="font-mono font-bold">app/page.tsx</code>
-        </p>
-        <div className="fixed bottom-0 left-0 flex h-48 w-full items-end justify-center bg-gradient-to-t from-white via-white dark:from-black dark:via-black lg:static lg:h-auto lg:w-auto lg:bg-none">
-          <a
-            className="pointer-events-none flex place-items-center gap-2 p-8 lg:pointer-events-auto lg:p-0"
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{' '}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className="dark:invert"
-              width={100}
-              height={24}
-              priority
-            />
-          </a>
-        </div>
-      </div>
+    <>
+      <SiteHeader />
+      <main>
+        <section className="hero">
+          <div className="hero-inner page-width">
+            <div className="hero-copy">
+              <span className="eyebrow"><span className="eyebrow-dot" /> India’s B2B sourcing marketplace</span>
+              <h1>Find the right supplier.<br /><span>Build what’s next.</span></h1>
+              <p>Discover products from businesses across India. Compare details, connect directly, and get your sourcing moving.</p>
+              <form action="/" className="hero-search" role="search">
+                <span aria-hidden="true" className="search-icon">⌕</span>
+                <input aria-label="Search products" name="q" placeholder="What are you looking for today?" defaultValue={searchParams.q ?? ''} />
+                <button type="submit">Search products <span aria-hidden="true">→</span></button>
+              </form>
+              <div className="popular-searches"><span>Popular:</span><Link href="/?q=solar">Solar panels</Link><Link href="/?q=packaging">Packaging</Link><Link href="/?q=steel">Steel</Link></div>
+            </div>
+            <div className="hero-art" aria-label="Illustration of sourcing and supply">
+              <div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" />
+              <div className="art-sun" />
+              <div className="art-card art-card-top"><span className="art-icon">↗</span><span><b>Made for business</b><small>Source with confidence</small></span></div>
+              <div className="art-box"><div className="box-tape" /><div className="box-mark">BTM</div><div className="box-spark">✦</div></div>
+              <div className="art-card art-card-bottom"><span className="verified-mark">✓</span><span><b>Trusted connections</b><small>Businesses, closer together</small></span></div>
+              <span className="art-leaf leaf-one">✦</span><span className="art-leaf leaf-two">✦</span>
+            </div>
+            <div className="hero-stats"><div><strong>Made in India</strong><span>Built for business, everywhere</span></div><i /><div><strong>One simple place</strong><span>Products, people and possibilities</span></div></div>
+          </div>
+        </section>
 
-      <div className="relative flex place-items-center before:absolute before:h-[300px] before:w-[480px] before:-translate-x-1/2 before:rounded-full before:bg-gradient-radial before:from-white before:to-transparent before:blur-2xl before:content-[''] after:absolute after:-z-20 after:h-[180px] after:w-[240px] after:translate-x-1/3 after:bg-gradient-conic after:from-sky-200 after:via-blue-200 after:blur-2xl after:content-[''] before:dark:bg-gradient-to-br before:dark:from-transparent before:dark:to-blue-700 before:dark:opacity-10 after:dark:from-sky-900 after:dark:via-[#0141ff] after:dark:opacity-40 before:lg:h-[360px] z-[-1]">
-        <Image
-          className="relative dark:drop-shadow-[0_0_0.3rem_#ffffff70] dark:invert"
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
-      </div>
+        <section className="category-section page-width">
+          <div className="section-heading"><div><span className="section-kicker">Explore the marketplace</span><h2>Source by category</h2></div><Link className="text-link" href="#products">View all products <span>→</span></Link></div>
+          <nav className="category-grid" aria-label="Product categories">
+            {categories.map((category) => (
+              <Link href={`/?category=${encodeURIComponent(category.name)}#products`} className="category-tile" key={category.name}>
+                <span className={`category-icon ${category.tone}`} aria-hidden="true">{category.icon}</span><span className="category-name">{category.name}</span><span className="category-arrow">↗</span>
+              </Link>
+            ))}
+          </nav>
+        </section>
 
-      <div className="mb-32 grid text-center lg:max-w-5xl lg:w-full lg:mb-0 lg:grid-cols-4 lg:text-left">
-        <a
-          href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Docs{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Find in-depth information about Next.js features and API.
-          </p>
-        </a>
+        <section className="products-section" id="products">
+          <div className="page-width">
+            <div className="section-heading">
+              <div><span className="section-kicker">Handpicked for business</span><h2>{query || selectedCategory ? 'Matching products' : 'Popular right now'}</h2><p className="section-subtitle">{query ? `Showing results for “${searchParams.q}”` : selectedCategory ? `Products in ${selectedCategory}` : 'Explore products businesses are sourcing this week.'}</p></div>
+              <Link className="text-link" href="/">Browse all <span>→</span></Link>
+            </div>
+            {visibleProducts.length ? <div className="product-grid">{visibleProducts.map((product) => <ProductCard key={product.slug} product={product} />)}</div> : <div className="empty-state"><span>⌕</span><h3>No matching products yet</h3><p>Try a broader search or browse all categories.</p><Link href="/" className="button button-secondary">Clear search</Link></div>}
+            <div className="demo-note">Sample listings for the Biz Trade Mart MVP preview.</div>
+          </div>
+        </section>
 
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Learn{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Learn about Next.js in an interactive course with&nbsp;quizzes!
-          </p>
-        </a>
-
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Templates{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Explore the Next.js 13 playground.
-          </p>
-        </a>
-
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Deploy{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
+        <section className="supplier-banner page-width">
+          <div><span className="section-kicker">For Indian businesses</span><h2>Have something to supply?</h2><p>Create your business profile and help buyers discover what you make.</p></div>
+          <Link href="/suppliers/surya-solar-industries" className="button button-light">Explore a supplier profile <span>→</span></Link>
+          <div className="banner-shape" aria-hidden="true">B</div>
+        </section>
+      </main>
+      <footer className="site-footer"><div className="page-width footer-inner"><Link className="brand-lockup" href="/"><span className="brand-mark">B<span>+</span></span><span className="brand-words"><b>Biz Trade Mart</b><small>Business starts here</small></span></Link><p>Connecting businesses with possibilities.</p><span>© 2026 Biz Trade Mart · MVP preview</span></div></footer>
+    </>
   );
 }
