@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# Biz Trade Mart buyer demo
 
-## Getting Started
+Phone-friendly buyer experience built with the repository's existing Next.js 13, React 18, and Tailwind setup. The interface uses original Biz Trade Mart branding and sample catalogue data.
 
-First, run the development server:
+## Routes
+
+- `/` — responsive homepage, product search, category filters, sample product cards
+- `/products/industrial-air-compressor` — product detail with mobile + OTP enquiry demo
+- `/suppliers/shree-engineering` — supplier profile and catalogue
+
+Other sample product and supplier routes are generated from `lib/products.ts`.
+
+## Open on a phone with StackBlitz
+
+1. Open this branch in StackBlitz:  
+   https://stackblitz.com/github/ashwanidubeytradeindia-bit/stackblitz-starters-qkn2x58e/tree/feat/biz-trade-mart-buyer-demo
+2. Wait for dependencies to install and the preview to start. If it does not start automatically, open the StackBlitz terminal and run `npm run dev`.
+3. Use the preview's **Open in new tab** button, then open that URL on your phone. You can also share the StackBlitz project URL above.
+
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open the URL printed by Next.js (usually http://localhost:3000). To open it on a phone connected to the same Wi-Fi, run:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run dev -- --hostname 0.0.0.0
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+Then visit `http://<your-computer-local-IP>:3000` on the phone. Keep both devices on the same Wi-Fi.
 
-## Learn More
+## Preview the enquiry flow
 
-To learn more about Next.js, take a look at the following resources:
+Open any product and tap **Send enquiry**. Enter a 10-digit mobile number, tap **Send OTP**, then use demo OTP `123456`. No SMS is sent and the final confirmation is not saved or sent to a real supplier.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Shareable deployed preview (optional)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+For a stable public preview URL, import this GitHub repository into Vercel, select branch `feat/biz-trade-mart-buyer-demo`, and deploy. Vercel will detect Next.js automatically. The generated deployment URL can be opened and shared from a phone. This repo branch itself remains the reviewable source for the demo.
 
-## Deploy on Vercel
+## Sample-data notice
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+Product names, prices, locations, specs, supplier profiles, and verification badges are illustrative interface data. They do not represent live listings or verified businesses. Search and category filters run in the browser; enquiry OTP is a demo-only flow and is not connected to a backend, database, SMS provider, or supplier account.
