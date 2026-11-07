@@ -161,7 +161,15 @@ export async function GET(request: NextRequest) {
       ema50: analysis.ema50,
       ema200: analysis.ema200,
       candleCount: analysis.candleCount,
-      plan: null,
+
+  candles: candles.slice(-120).map((c) => ({
+  time: c.time,
+  open: c.open,
+  high: c.high,
+  low: c.low,
+  close: c.close,
+  volume: c.volume,
+})),    plan: null,
       lastCandleTime: new Date(
         latest.time * 1000
       ).toISOString(),
