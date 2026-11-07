@@ -24,11 +24,7 @@ type Analysis = {
   support: number;
   resistance: number;
   rsi: number;
-  macd: {
-    line: number;
-    signal: number;
-    histogram: number;
-  };
+  macd: { line: number; signal: number; histogram: number };
   ema20: number;
   ema50: number;
   candles: Candle[];
@@ -40,11 +36,18 @@ type Ticker = {
   coin: Coin;
   symbol: string;
   price: number;
+  priceType: string;
+  lastPrice: number | null;
+  closePrice: number | null;
+  markPrice: number | null;
+  spotPrice: number | null;
   sourceAt: number | null;
   receivedAt: number;
+  tickerFresh: boolean;
+  tradeVerified: boolean;
 };
 
-type AlertEvent = {
+type AlertItem = {
   id: number;
   coin: Coin;
   tf: TF;
@@ -54,45 +57,31 @@ type AlertEvent = {
   at: number;
 };
 
-type Health = {
-  success: number;
-  failed: number;
-  lastMs: number | null;
-  lastSuccess: number | null;
-};
-
-type TradePlan = {
-  entry: number;
-  stop: number;
-  t1: number;
-  t2: number;
-  t3: number;
-  risk: number;
-};
-
 const TFS: TF[] = ["5m", "15m", "1h", "4h"];
-const TF_SECONDS: Record<TF, number> = {
+const SECONDS: Record<TF, number> = {
   "5m": 300,
   "15m": 900,
   "1h": 3600,
   "4h": 14400,
 };
 
-const SELECTED_MS = 1000;
+const REFRESH_MS = 1000;
 const MULTI_MS = 60000;
-const TICKER_MS = 1000;
-const SNAPSHOT_MAX_AGE = 120000;
+const MAX_SNAPSHOT_AGE = 120000;
 
-function numberValue(value: unknown): number {
-  if (value === null || value === undefined || value === "") {
-    return NaN;
-  }
-  const n = Number(value);
+function numeric(v: unknown): number {
+  if (v === null || v === undefined || v === "") return NaN;
+  const n = Number(v);
   return Number.isFinite(n) ? n : NaN;
 }
 
-function fmt(value: unknown, digits = 2): string {
-  const n = numberValue(value);
+function optionalNumber(v: unknown): number | null {
+  const n = numeric(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function money(v: unknown, digits = 2): string {
+  const n = numeric(v);
   return Number.isFinite(n)
     ? n.toLocaleString("en-US", {
         minimumFractionDigits: digits,
@@ -101,22 +90,20 @@ function fmt(value: unknown, digits = 2): string {
     : "—";
 }
 
-function parseTimestamp(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") {
-    return null;
+function timestamp(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "string" && !/^\d+(\.\d+)?$/.test(v)) {
+    const n = Date.parse(v);
+    return Number.isFinite(n) ? n : null;
   }
-  if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value)) {
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  const n = numberValue(value);
+  const n = numeric(v);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return n < 1e11 ? n * 1000 : n;
+  return n < 1e11 ? n * 1000 : n >= 1e14 ? n / 1000 : n;
 }
 
-function timeLabel(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "Not supplied";
-  return new Date(value).toLocaleString("en-IN", {
+function dateText(v: number | null): string {
+  if (v === null) return "Unavailable";
+  return new Date(v).toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
     month: "short",
@@ -126,36 +113,35 @@ function timeLabel(value: number | null): string {
   });
 }
 
-function ageLabel(timestamp: number | null, now: number): string {
-  if (timestamp === null) return "Unavailable";
-  const seconds = Math.floor((now - timestamp) / 1000);
-  if (seconds < -5) return `Clock difference ${Math.abs(seconds)}s`;
-  if (seconds < 0) return "0s ago";
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
+function ageText(v: number | null, now: number): string {
+  if (v === null) return "Unavailable";
+  const s = Math.floor((now - v) / 1000);
+  if (s < -5) return `Clock difference ${Math.abs(s)}s`;
+  if (s < 60) return `${Math.max(0, s)}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
-function colorOf(signal: Signal): string {
-  return signal === "LONG"
+function signalColor(s: Signal): string {
+  return s === "LONG"
     ? "#22c55e"
-    : signal === "SHORT"
+    : s === "SHORT"
     ? "#fb7185"
     : "#facc15";
 }
 
 function normalizeAnalysis(raw: any, coin: Coin, tf: TF): Analysis {
-  if (!raw || typeof raw !== "object" || raw.error) {
+  if (!raw || raw.error) {
     throw new Error(String(raw?.error || "Invalid analysis response"));
   }
 
   const candles: Candle[] = (Array.isArray(raw.candles) ? raw.candles : [])
     .map((c: any) => ({
-      time: numberValue(c.time),
-      open: numberValue(c.open),
-      high: numberValue(c.high),
-      low: numberValue(c.low),
-      close: numberValue(c.close),
+      time: numeric(c.time),
+      open: numeric(c.open),
+      high: numeric(c.high),
+      low: numeric(c.low),
+      close: numeric(c.close),
     }))
     .filter(
       (c: Candle) =>
@@ -171,41 +157,42 @@ function normalizeAnalysis(raw: any, coin: Coin, tf: TF): Analysis {
     .sort((a: Candle, b: Candle) => a.time - b.time);
 
   if (candles.length < 2) {
-    throw new Error("Analysis API returned insufficient candles");
+    throw new Error("Insufficient candle data");
   }
 
-  const price = numberValue(raw.price);
-  const support = numberValue(raw.support);
-  const resistance = numberValue(raw.resistance);
+  const price = numeric(raw.price);
+  const support = numeric(raw.support);
+  const resistance = numeric(raw.resistance);
 
-  if (![price, support, resistance].every(Number.isFinite) || price <= 0) {
-    throw new Error("Invalid price, support or resistance");
+  if (
+    ![price, support, resistance].every(Number.isFinite) ||
+    price <= 0
+  ) {
+    throw new Error("Invalid analysis price or levels");
   }
-
-  const signal: Signal =
-    raw.signal === "LONG" || raw.signal === "SHORT"
-      ? raw.signal
-      : "HOLD";
 
   return {
     coin,
     symbol: String(raw.symbol || `${coin}USD`),
     timeframe: tf,
     price,
-    signal,
+    signal:
+      raw.signal === "LONG" || raw.signal === "SHORT"
+        ? raw.signal
+        : "HOLD",
     support,
     resistance,
-    rsi: numberValue(raw.rsi),
+    rsi: numeric(raw.rsi),
     macd: {
-      line: numberValue(raw.macd?.line),
-      signal: numberValue(raw.macd?.signal),
-      histogram: numberValue(raw.macd?.histogram),
+      line: numeric(raw.macd?.line),
+      signal: numeric(raw.macd?.signal),
+      histogram: numeric(raw.macd?.histogram),
     },
-    ema20: numberValue(raw.ema20),
-    ema50: numberValue(raw.ema50),
+    ema20: numeric(raw.ema20),
+    ema50: numeric(raw.ema50),
     candles,
     receivedAt: Date.now(),
-    sourceAt: parseTimestamp(
+    sourceAt: timestamp(
       raw.sourceTimestamp ??
       raw.sourceAt ??
       raw.updatedAt ??
@@ -214,58 +201,91 @@ function normalizeAnalysis(raw: any, coin: Coin, tf: TF): Analysis {
   };
 }
 
+function normalizeTicker(raw: any, coin: Coin): Ticker {
+  if (!raw || raw.error) {
+    throw new Error(String(raw?.error || "Invalid ticker response"));
+  }
+
+  const price = numeric(raw.price);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("Ticker price unavailable");
+  }
+
+  return {
+    coin,
+    symbol: String(raw.symbol || `${coin}USD`),
+    price,
+    priceType: String(raw.priceType || "unknown"),
+    lastPrice: optionalNumber(raw.lastPrice),
+    closePrice: optionalNumber(raw.closePrice),
+    markPrice: optionalNumber(raw.markPrice),
+    spotPrice: optionalNumber(raw.spotPrice),
+    sourceAt: timestamp(raw.sourceTimestamp),
+    receivedAt: Date.now(),
+    tickerFresh: raw.tickerFresh === true,
+    tradeVerified: raw.isLiveTradeVerified === true,
+  };
+}
+
 function ema(candles: Candle[], period: number): (number | null)[] {
-  const result: (number | null)[] = candles.map(() => null);
-  if (candles.length < period) return result;
+  const output: (number | null)[] = candles.map(() => null);
+  if (candles.length < period) return output;
 
   let sum = 0;
   for (let i = 0; i < period; i++) sum += candles[i].close;
 
   let previous = sum / period;
-  result[period - 1] = previous;
+  output[period - 1] = previous;
 
   const k = 2 / (period + 1);
   for (let i = period; i < candles.length; i++) {
     previous = candles[i].close * k + previous * (1 - k);
-    result[i] = previous;
+    output[i] = previous;
   }
-  return result;
+  return output;
 }
 
-function calculatePlan(data: Analysis): TradePlan | null {
+function tradePlan(data: Analysis) {
   if (data.signal === "HOLD") return null;
 
-  const entry = data.price;
   const recent = data.candles.slice(-14);
-
-  // Approximate average candle range, not formal ATR.
   const avgRange =
-    recent.reduce((sum, c) => sum + (c.high - c.low), 0) /
+    recent.reduce((sum, c) => sum + c.high - c.low, 0) /
     Math.max(1, recent.length);
 
-  const minRisk = Math.max(avgRange * 1.5, entry * 0.002);
+  const entry = data.price;
+  const minimumRisk = Math.max(avgRange * 1.5, entry * 0.002);
+
   const stop =
     data.signal === "LONG"
       ? Math.min(
-          data.support < entry ? data.support - avgRange * 0.2 : entry - minRisk,
-          entry - minRisk
+          data.support < entry
+            ? data.support - avgRange * 0.2
+            : entry - minimumRisk,
+          entry - minimumRisk
         )
       : Math.max(
           data.resistance > entry
             ? data.resistance + avgRange * 0.2
-            : entry + minRisk,
-          entry + minRisk
+            : entry + minimumRisk,
+          entry + minimumRisk
         );
 
   const risk = Math.abs(entry - stop);
-  if (!Number.isFinite(risk) || risk <= 0 || stop <= 0) return null;
-
   const direction = data.signal === "LONG" ? 1 : -1;
+
   const t1 = entry + direction * risk;
   const t2 = entry + direction * risk * 2;
   const t3 = entry + direction * risk * 3;
 
-  if ([t1, t2, t3].some((n) => n <= 0)) return null;
+  if (
+    !Number.isFinite(risk) ||
+    risk <= 0 ||
+    stop <= 0 ||
+    Math.min(t1, t2, t3) <= 0
+  ) {
+    return null;
+  }
 
   return { entry, stop, t1, t2, t3, risk };
 }
@@ -281,10 +301,8 @@ function Metric({
 }) {
   return (
     <div className="metric">
-      <div className="metricLabel">{label}</div>
-      <strong className="metricValue" style={{ color: color || "#e2e8f0" }}>
-        {value}
-      </strong>
+      <span>{label}</span>
+      <strong style={{ color: color || "#e2e8f0" }}>{value}</strong>
     </div>
   );
 }
@@ -296,125 +314,117 @@ function Chart({
 }: {
   data: Analysis;
   count: number;
-  plan: TradePlan | null;
+  plan: ReturnType<typeof tradePlan>;
 }) {
   const candles = data.candles.slice(-count);
-  const ema20 = ema(data.candles, 20).slice(-count);
-  const ema50 = ema(data.candles, 50).slice(-count);
+  const line20 = ema(data.candles, 20).slice(-count);
+  const line50 = ema(data.candles, 50).slice(-count);
 
-  const width = 900;
-  const height = 400;
-  const left = 15;
-  const right = 125;
-  const top = 20;
-  const bottom = 42;
-  const pw = width - left - right;
-  const ph = height - top - bottom;
+  const W = 900;
+  const H = 400;
+  const L = 15;
+  const R = 125;
+  const T = 20;
+  const B = 42;
+  const plotW = W - L - R;
+  const plotH = H - T - B;
 
   const levels = [
-    { name: "PRICE", value: data.price, color: "#60a5fa" },
-    { name: "SUP", value: data.support, color: "#22c55e" },
-    { name: "RES", value: data.resistance, color: "#fb7185" },
+    { id: "PRICE", value: data.price, color: "#60a5fa" },
+    { id: "SUP", value: data.support, color: "#22c55e" },
+    { id: "RES", value: data.resistance, color: "#fb7185" },
   ];
 
   if (plan) {
     levels.push(
-      { name: "SL", value: plan.stop, color: "#fb7185" },
-      { name: "T1", value: plan.t1, color: "#4ade80" },
-      { name: "T2", value: plan.t2, color: "#22c55e" },
-      { name: "T3", value: plan.t3, color: "#10b981" }
+      { id: "SL", value: plan.stop, color: "#fb7185" },
+      { id: "T1", value: plan.t1, color: "#4ade80" },
+      { id: "T2", value: plan.t2, color: "#22c55e" },
+      { id: "T3", value: plan.t3, color: "#10b981" }
     );
   }
 
   const values = [
     ...candles.flatMap((c) => [c.low, c.high]),
-    ...ema20.filter((v): v is number => v !== null),
-    ...ema50.filter((v): v is number => v !== null),
-    ...levels.map((l) => l.value),
+    ...line20.filter((v): v is number => v !== null),
+    ...line50.filter((v): v is number => v !== null),
+    ...levels.map((v) => v.value),
   ];
 
   const min = Math.min(...values);
   const max = Math.max(...values);
   const pad = Math.max((max - min) * 0.08, max * 0.0001);
-  const lo = min - pad;
-  const hi = max + pad;
+  const low = min - pad;
+  const high = max + pad;
 
-  const y = (v: number) => top + ((hi - v) / (hi - lo)) * ph;
-  const slot = pw / candles.length;
-  const x = (i: number) => left + slot * (i + 0.5);
+  const y = (v: number) => T + ((high - v) / (high - low)) * plotH;
+  const slot = plotW / candles.length;
+  const x = (i: number) => L + slot * (i + 0.5);
 
-  function path(series: (number | null)[]): string {
-    let output = "";
+  function makePath(values: (number | null)[]) {
+    let result = "";
     let started = false;
-    series.forEach((v, i) => {
+    values.forEach((v, i) => {
       if (v === null || !Number.isFinite(v)) {
         started = false;
         return;
       }
-      output += `${started ? "L" : "M"}${x(i)},${y(v)} `;
+      result += `${started ? "L" : "M"}${x(i)},${y(v)} `;
       started = true;
     });
-    return output;
+    return result;
   }
 
-  const sorted = [...levels]
-    .map((l) => ({ ...l, actualY: y(l.value) }))
-    .sort((a, b) => a.actualY - b.actualY);
+  const sorted = levels
+    .map((v) => ({ ...v, position: y(v.value) }))
+    .sort((a, b) => a.position - b.position);
 
-  const labels: Record<string, number> = {};
-  sorted.forEach((l, i) => {
-    const prev = i ? labels[sorted[i - 1].name] : top - 15;
-    labels[l.name] = Math.max(l.actualY, prev + 18, top + 8);
+  const labelPositions: Record<string, number> = {};
+
+  sorted.forEach((v, i) => {
+    const previous =
+      i === 0 ? T - 15 : labelPositions[sorted[i - 1].id];
+    labelPositions[v.id] = Math.max(v.position, previous + 18, T + 8);
   });
 
   if (sorted.length) {
     const last = sorted[sorted.length - 1];
-    const overflow = labels[last.name] - (height - bottom - 8);
+    const overflow = labelPositions[last.id] - (H - B - 8);
     if (overflow > 0) {
-      sorted.forEach((l) => {
-        labels[l.name] -= overflow;
+      sorted.forEach((v) => {
+        labelPositions[v.id] -= overflow;
       });
     }
   }
 
   return (
     <div className="chartBox">
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        className="chartSvg"
-        role="img"
-        aria-label="BTC or ETH candlestick chart with EMA and trading levels"
-      >
-        <rect width={width} height={height} fill="#101b2d" />
+      <svg viewBox={`0 0 ${W} ${H}`} className="chartSvg" role="img" aria-label="Candlestick chart">
+        <rect width={W} height={H} fill="#101b2d" />
 
-        {Array.from({ length: 5 }, (_, i) => lo + ((hi - lo) * i) / 4).map(
-          (value, i) => (
+        {Array.from({ length: 5 }, (_, i) => low + ((high - low) * i) / 4).map(
+          (v, i) => (
             <g key={i}>
               <line
-                x1={left}
-                x2={width - right}
-                y1={y(value)}
-                y2={y(value)}
+                x1={L}
+                x2={W - R}
+                y1={y(v)}
+                y2={y(v)}
                 stroke="#29384e"
                 strokeDasharray="4 5"
               />
-              <text
-                x={width - right + 6}
-                y={y(value) + 4}
-                fill="#94a3b8"
-                fontSize="11"
-              >
-                {fmt(value, 1)}
+              <text x={W - R + 6} y={y(v) + 4} fill="#94a3b8" fontSize="11">
+                {money(v, 1)}
               </text>
             </g>
           )
         )}
 
         {candles.map((c, i) => {
-          const green = c.close >= c.open;
-          const color = green ? "#22c55e" : "#ef4444";
-          const bodyTop = Math.min(y(c.open), y(c.close));
-          const bodyHeight = Math.max(1.5, Math.abs(y(c.open) - y(c.close)));
+          const color = c.close >= c.open ? "#22c55e" : "#ef4444";
+          const top = Math.min(y(c.open), y(c.close));
+          const body = Math.max(1.5, Math.abs(y(c.open) - y(c.close)));
+          const bodyWidth = Math.max(2, slot * 0.6);
 
           return (
             <g key={`${c.time}-${i}`}>
@@ -427,24 +437,24 @@ function Chart({
                 strokeWidth="1.4"
               />
               <rect
-                x={x(i) - Math.max(2, slot * 0.6) / 2}
-                y={bodyTop}
-                width={Math.max(2, slot * 0.6)}
-                height={bodyHeight}
+                x={x(i) - bodyWidth / 2}
+                y={top}
+                width={bodyWidth}
+                height={body}
                 fill={color}
               />
             </g>
           );
         })}
 
-        <path d={path(ema20)} fill="none" stroke="#fbbf24" strokeWidth="2.2" />
-        <path d={path(ema50)} fill="none" stroke="#a78bfa" strokeWidth="2.2" />
+        <path d={makePath(line20)} fill="none" stroke="#fbbf24" strokeWidth="2.2" />
+        <path d={makePath(line50)} fill="none" stroke="#a78bfa" strokeWidth="2.2" />
 
         {levels.map((level) => (
-          <g key={level.name}>
+          <g key={level.id}>
             <line
-              x1={left}
-              x2={width - right}
+              x1={L}
+              x2={W - R}
               y1={y(level.value)}
               y2={y(level.value)}
               stroke={level.color}
@@ -452,21 +462,21 @@ function Chart({
               strokeDasharray="6 5"
             />
             <rect
-              x={width - right}
-              y={labels[level.name] - 9}
-              width={right - 3}
+              x={W - R}
+              y={labelPositions[level.id] - 9}
+              width={R - 3}
               height={18}
               rx={3}
               fill="#24364f"
             />
             <text
-              x={width - right + 5}
-              y={labels[level.name] + 4}
+              x={W - R + 5}
+              y={labelPositions[level.id] + 4}
               fill={level.color}
               fontSize="11"
               fontWeight="bold"
             >
-              {level.name} {fmt(level.value, 1)}
+              {level.id} {money(level.value, 1)}
             </text>
           </g>
         ))}
@@ -474,18 +484,19 @@ function Chart({
         {candles.map((c, i) => {
           const step = Math.max(1, Math.ceil(candles.length / 6));
           if (i % step !== 0) return null;
-          const timestamp = parseTimestamp(c.time);
+          const at = timestamp(c.time);
+
           return (
             <text
               key={`time-${i}`}
               x={x(i)}
-              y={height - 12}
+              y={H - 12}
               fill="#94a3b8"
               fontSize="11"
               textAnchor="middle"
             >
-              {timestamp
-                ? new Date(timestamp).toLocaleTimeString("en-IN", {
+              {at
+                ? new Date(at).toLocaleTimeString("en-IN", {
                     timeZone: "Asia/Kolkata",
                     hour: "2-digit",
                     minute: "2-digit",
@@ -513,105 +524,102 @@ export default function Home() {
   const [tf, setTf] = useState<TF>("15m");
   const [data, setData] = useState<Analysis | null>(null);
   const [ticker, setTicker] = useState<Ticker | null>(null);
-  const [tickerError, setTickerError] = useState("");
   const [multi, setMulti] = useState<Partial<Record<TF, Analysis>>>({});
-  const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
   const [alertsEnabled, setAlertsEnabled] = useState(true);
-  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [zoom, setZoom] = useState(60);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [tickerError, setTickerError] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const [health, setHealth] = useState<Health>({
-    success: 0,
-    failed: 0,
-    lastMs: null,
-    lastSuccess: null,
-  });
   const [unchanged, setUnchanged] = useState(0);
   const [lastPriceChange, setLastPriceChange] = useState<number | null>(null);
+  const [health, setHealth] = useState({
+    success: 0,
+    failed: 0,
+    lastMs: null as number | null,
+    lastSuccess: null as number | null,
+  });
 
   const generation = useRef(0);
   const selectedBusy = useRef(false);
-  const multiBusy = useRef(false);
   const tickerBusy = useRef(false);
+  const multiBusy = useRef(false);
+  const selectionRef = useRef({ coin, tf });
   const previousSignal = useRef<Signal | null>(null);
   const previousPrice = useRef<number | null>(null);
-  const currentSelection = useRef({ coin, tf });
-  const alertId = useRef(0);
+  const alertCounter = useRef(0);
+  const alertsEnabledRef = useRef(alertsEnabled);
 
-  currentSelection.current = { coin, tf };
+  selectionRef.current = { coin, tf };
+  alertsEnabledRef.current = alertsEnabled;
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
   }, []);
 
-  const recordHealth = useCallback((ok: boolean, elapsed: number) => {
+  const recordHealth = useCallback((success: boolean, ms: number) => {
     setHealth((old) => ({
-      success: old.success + (ok ? 1 : 0),
-      failed: old.failed + (ok ? 0 : 1),
-      lastMs: elapsed,
-      lastSuccess: ok ? Date.now() : old.lastSuccess,
+      success: old.success + (success ? 1 : 0),
+      failed: old.failed + (success ? 0 : 1),
+      lastMs: ms,
+      lastSuccess: success ? Date.now() : old.lastSuccess,
     }));
   }, []);
 
-  const fetchAnalysis = useCallback(
+  const getAnalysis = useCallback(
     async (c: Coin, t: TF, signal?: AbortSignal) => {
-      const started = performance.now();
-      let recorded = false;
+      const start = performance.now();
+
       try {
         const response = await fetch(
           `/api/analysis?coin=${c}&timeframe=${t}`,
           { cache: "no-store", signal }
         );
         const raw = await response.json();
+
         if (!response.ok) {
-          throw new Error(String(raw?.error || `Analysis HTTP ${response.status}`));
+          throw new Error(String(raw?.error || `HTTP ${response.status}`));
         }
+
         const result = normalizeAnalysis(raw, c, t);
-        recordHealth(true, Math.round(performance.now() - started));
-        recorded = true;
+        recordHealth(true, Math.round(performance.now() - start));
         return result;
-      } catch (err) {
-        if (!recorded && !signal?.aborted) {
-          recordHealth(false, Math.round(performance.now() - started));
+      } catch (e) {
+        if (!signal?.aborted) {
+          recordHealth(false, Math.round(performance.now() - start));
         }
-        throw err;
+        throw e;
       }
     },
     [recordHealth]
   );
 
-  const fetchTicker = useCallback(
-    async (c: Coin, signal?: AbortSignal): Promise<Ticker> => {
-      const started = performance.now();
+  const getTicker = useCallback(
+    async (c: Coin, signal?: AbortSignal) => {
+      const start = performance.now();
+
       try {
         const response = await fetch(`/api/ticker?coin=${c}`, {
           cache: "no-store",
           signal,
         });
         const raw = await response.json();
+
         if (!response.ok) {
-          throw new Error(String(raw?.error || `Ticker HTTP ${response.status}`));
+          throw new Error(String(raw?.error || `HTTP ${response.status}`));
         }
-        const price = numberValue(raw.price);
-        if (!Number.isFinite(price) || price <= 0) {
-          throw new Error("Ticker returned invalid price");
-        }
-        recordHealth(true, Math.round(performance.now() - started));
-        return {
-          coin: c,
-          symbol: String(raw.symbol || `${c}USD`),
-          price,
-          sourceAt: parseTimestamp(raw.sourceTimestamp),
-          receivedAt: Date.now(),
-        };
-      } catch (err) {
+
+        const result = normalizeTicker(raw, c);
+        recordHealth(true, Math.round(performance.now() - start));
+        return result;
+      } catch (e) {
         if (!signal?.aborted) {
-          recordHealth(false, Math.round(performance.now() - started));
+          recordHealth(false, Math.round(performance.now() - start));
         }
-        throw err;
+        throw e;
       }
     },
     [recordHealth]
@@ -619,54 +627,64 @@ export default function Home() {
 
   const addAlert = useCallback(
     (from: Signal, to: Signal, test: boolean, c: Coin, t: TF) => {
-      alertId.current += 1;
-      const item: AlertEvent = {
-        id: alertId.current,
-        coin: c,
-        tf: t,
-        from,
-        to,
-        test,
-        at: Date.now(),
-      };
-      setAlerts((old) => [item, ...old].slice(0, 30));
+      alertCounter.current += 1;
+
+      setAlerts((old) =>
+        [
+          {
+            id: alertCounter.current,
+            coin: c,
+            tf: t,
+            from,
+            to,
+            test,
+            at: Date.now(),
+          },
+          ...old,
+        ].slice(0, 30)
+      );
     },
     []
   );
 
-  const applySelected = useCallback(
+  const applyAnalysis = useCallback(
     (result: Analysis) => {
-      const previous = previousSignal.current;
+      const old = previousSignal.current;
 
-      if (previous && previous !== result.signal && alertsEnabled) {
-        addAlert(previous, result.signal, false, result.coin, result.timeframe);
+      if (old && old !== result.signal && alertsEnabledRef.current) {
+        addAlert(old, result.signal, false, result.coin, result.timeframe);
       }
       previousSignal.current = result.signal;
 
       if (previousPrice.current === result.price) {
-        setUnchanged((old) => old + 1);
+        setUnchanged((v) => v + 1);
       } else {
-        if (previousPrice.current !== null) setLastPriceChange(Date.now());
+        if (previousPrice.current !== null) {
+          setLastPriceChange(Date.now());
+        }
         setUnchanged(0);
       }
-      previousPrice.current = result.price;
 
+      previousPrice.current = result.price;
       setData(result);
-      setMulti((old) => ({ ...old, [result.timeframe]: result }));
+      setMulti((oldMulti) => ({
+        ...oldMulti,
+        [result.timeframe]: result,
+      }));
       setError("");
     },
-    [alertsEnabled, addAlert]
+    [addAlert]
   );
 
   useEffect(() => {
     const id = ++generation.current;
     const controller = new AbortController();
 
-    selectedBusy.current = true;
-    multiBusy.current = false;
-    tickerBusy.current = false;
     previousSignal.current = null;
     previousPrice.current = null;
+    selectedBusy.current = true;
+    tickerBusy.current = false;
+    multiBusy.current = false;
 
     setData(null);
     setTicker(null);
@@ -677,14 +695,15 @@ export default function Home() {
     setUnchanged(0);
     setLastPriceChange(null);
 
-    const load = async () => {
+    async function load() {
       try {
-        const result = await fetchAnalysis(coin, tf, controller.signal);
-        if (id !== generation.current || controller.signal.aborted) return;
-        applySelected(result);
-      } catch (err) {
+        const result = await getAnalysis(coin, tf, controller.signal);
         if (id === generation.current && !controller.signal.aborted) {
-          setError(err instanceof Error ? err.message : "Analysis unavailable");
+          applyAnalysis(result);
+        }
+      } catch (e) {
+        if (id === generation.current && !controller.signal.aborted) {
+          setError(e instanceof Error ? e.message : "Analysis unavailable");
         }
       } finally {
         if (id === generation.current) {
@@ -692,7 +711,7 @@ export default function Home() {
           setLoading(false);
         }
       }
-    };
+    }
 
     void load();
 
@@ -700,62 +719,60 @@ export default function Home() {
       controller.abort();
       generation.current++;
     };
-    // applySelected intentionally omitted to avoid reloading on alert toggle.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coin, tf, fetchAnalysis]);
+  }, [coin, tf, getAnalysis, applyAnalysis]);
 
   const refreshSelected = useCallback(async () => {
     if (selectedBusy.current || document.visibilityState === "hidden") return;
 
     const id = generation.current;
-    const selected = currentSelection.current;
+    const selected = selectionRef.current;
     selectedBusy.current = true;
 
     try {
-      const result = await fetchAnalysis(selected.coin, selected.tf);
-      if (id === generation.current) applySelected(result);
-    } catch (err) {
+      const result = await getAnalysis(selected.coin, selected.tf);
+      if (id === generation.current) applyAnalysis(result);
+    } catch (e) {
       if (id === generation.current) {
-        setError(err instanceof Error ? err.message : "Analysis refresh failed");
+        setError(e instanceof Error ? e.message : "Analysis refresh failed");
       }
     } finally {
       if (id === generation.current) selectedBusy.current = false;
     }
-  }, [fetchAnalysis, applySelected]);
+  }, [getAnalysis, applyAnalysis]);
 
   const refreshTicker = useCallback(async () => {
     if (tickerBusy.current || document.visibilityState === "hidden") return;
 
     const id = generation.current;
-    const selected = currentSelection.current;
+    const selected = selectionRef.current;
     tickerBusy.current = true;
 
     try {
-      const result = await fetchTicker(selected.coin);
+      const result = await getTicker(selected.coin);
       if (id === generation.current) {
         setTicker(result);
         setTickerError("");
       }
-    } catch (err) {
+    } catch (e) {
       if (id === generation.current) {
-        setTickerError(err instanceof Error ? err.message : "Ticker unavailable");
+        setTickerError(e instanceof Error ? e.message : "Ticker unavailable");
       }
     } finally {
       if (id === generation.current) tickerBusy.current = false;
     }
-  }, [fetchTicker]);
+  }, [getTicker]);
 
   const refreshMulti = useCallback(async () => {
     if (multiBusy.current || document.visibilityState === "hidden") return;
 
     const id = generation.current;
-    const selected = currentSelection.current;
+    const selected = selectionRef.current;
     multiBusy.current = true;
 
     try {
       const others = TFS.filter((t) => t !== selected.tf);
       const results = await Promise.allSettled(
-        others.map((t) => fetchAnalysis(selected.coin, t))
+        others.map((t) => getAnalysis(selected.coin, t))
       );
 
       if (id !== generation.current) return;
@@ -766,22 +783,23 @@ export default function Home() {
           next[others[i]] = result.value;
         }
       });
+
       setMulti((old) => ({ ...old, ...next }));
     } finally {
       if (id === generation.current) multiBusy.current = false;
     }
-  }, [fetchAnalysis]);
+  }, [getAnalysis]);
 
   useEffect(() => {
     if (!auto) return;
 
     const selectedTimer = window.setInterval(
       () => void refreshSelected(),
-      SELECTED_MS
+      REFRESH_MS
     );
     const tickerTimer = window.setInterval(
       () => void refreshTicker(),
-      TICKER_MS
+      REFRESH_MS
     );
     const multiTimer = window.setInterval(
       () => void refreshMulti(),
@@ -805,66 +823,91 @@ export default function Home() {
     };
   }, [auto, coin, tf, refreshSelected, refreshTicker, refreshMulti]);
 
-  const plan = useMemo(() => (data ? calculatePlan(data) : null), [data]);
+  const plan = useMemo(() => (data ? tradePlan(data) : null), [data]);
 
   const consensus = useMemo(() => {
     const loaded = TFS.map((t) => multi[t]).filter(
       (v): v is Analysis => Boolean(v)
     );
+
     const long = loaded.filter((v) => v.signal === "LONG").length;
     const short = loaded.filter((v) => v.signal === "SHORT").length;
     const hold = loaded.filter((v) => v.signal === "HOLD").length;
-    const fresh = loaded.every(
-      (v) => now - v.receivedAt >= 0 && now - v.receivedAt < SNAPSHOT_MAX_AGE
-    );
+
+    const fresh =
+      loaded.length === 4 &&
+      loaded.every(
+        (v) =>
+          now - v.receivedAt >= 0 &&
+          now - v.receivedAt < MAX_SNAPSHOT_AGE
+      );
 
     let signal: Signal = "HOLD";
-    if (loaded.length === 4 && fresh) {
+
+    if (fresh) {
       if (long >= 3) signal = "LONG";
       else if (short >= 3) signal = "SHORT";
     }
+
     return { loaded: loaded.length, long, short, hold, fresh, signal };
   }, [multi, now]);
 
-  const lastCandleAt = data?.candles.length
-    ? parseTimestamp(data.candles[data.candles.length - 1].time)
-    : null;
+  const lastCandleAt =
+    data && data.candles.length
+      ? timestamp(data.candles[data.candles.length - 1].time)
+      : null;
 
-  const candleAge = lastCandleAt === null ? null : now - lastCandleAt;
-  const candleWindow = TF_SECONDS[tf] * 1000;
+  const candleAge =
+    lastCandleAt === null ? null : now - lastCandleAt;
+
   const candleFresh =
     candleAge !== null &&
     candleAge >= -5000 &&
-    candleAge < candleWindow * 2;
+    candleAge < SECONDS[tf] * 2000;
+
+  const tickerReceivedFresh =
+    ticker !== null &&
+    now >= ticker.receivedAt &&
+    now - ticker.receivedAt < 10000;
+
+  const sourceFresh =
+    ticker !== null &&
+    ticker.sourceAt !== null &&
+    now - ticker.sourceAt >= -10000 &&
+    now - ticker.sourceAt <= 30000;
 
   const tickerFresh =
-    ticker !== null &&
-    now - ticker.receivedAt >= 0 &&
-    now - ticker.receivedAt < 10000 &&
-    (ticker.sourceAt === null ||
-      Math.abs(now - ticker.sourceAt) < 30000);
+    tickerReceivedFresh &&
+    sourceFresh &&
+    ticker?.tickerFresh === true;
 
   const priceDifference =
     data && ticker
-      ? Math.abs(data.price - ticker.price) / ticker.price * 100
+      ? (Math.abs(data.price - ticker.price) / ticker.price) * 100
       : null;
 
   const priceAligned =
     priceDifference !== null && priceDifference <= 0.5;
 
+  const directionMatches =
+    data !== null &&
+    data.signal !== "HOLD" &&
+    data.signal === consensus.signal;
+
+  // This gate confirms only the configured technical rules.
+  // It never asserts that an actual exchange trade was verified.
   const confirmed =
-    Boolean(data) &&
-    data!.signal !== "HOLD" &&
-    data!.signal === consensus.signal &&
+    directionMatches &&
     consensus.fresh &&
     candleFresh &&
     tickerFresh &&
     priceAligned;
 
   const totalRequests = health.success + health.failed;
-  const errorRate = totalRequests
-    ? (health.failed / totalRequests) * 100
-    : 0;
+  const errorRate =
+    totalRequests > 0 ? (health.failed / totalRequests) * 100 : 0;
+
+  const latestAlert = alerts[0];
 
   return (
     <main className="dashboard">
@@ -872,10 +915,10 @@ export default function Home() {
         <header className="header">
           <div>
             <h1>Crypto Signal Pro</h1>
-            <p className="muted">Milestone 9.4.1 · BTC / ETH Analysis</p>
+            <p className="muted">Milestone 9.4.3 · BTC / ETH Analysis</p>
           </div>
-          <span className="statusBadge green">
-            ● {auto ? "AUTO ON" : "AUTO OFF"}
+          <span className={`badge ${auto ? "green" : "yellow"}`}>
+            {auto ? "● AUTO ON" : "AUTO OFF"}
           </span>
         </header>
 
@@ -914,6 +957,7 @@ export default function Home() {
               {alertsEnabled ? "Enabled" : "Disabled"}
             </span>
           </div>
+
           <div className="controlRow">
             <label className="checkLabel">
               <input
@@ -932,195 +976,237 @@ export default function Home() {
               Test Alert
             </button>
           </div>
+
           <p className="muted small">
-            Alerts appear on screen while this page is open.
-            Test Alert does not change real signals or place orders.
+            Alerts appear while this page is open. Test alerts are not
+            real trading signals.
           </p>
-          {alerts[0] && (
-            <div className={`alertBox ${alerts[0].test ? "test" : ""}`}>
+
+          {latestAlert && (
+            <div className={`alertBox ${latestAlert.test ? "test" : ""}`}>
               <strong>
-                {alerts[0].test
+                {latestAlert.test
                   ? "TEST ALERT — NOT A REAL SIGNAL"
-                  : "SIGNAL CHANGED"}
+                  : "SIGNAL CHANGE"}
               </strong>
               <p>
-                {alerts[0].coin} · {alerts[0].tf}:{" "}
-                {alerts[0].from} → {alerts[0].to}
+                {latestAlert.coin} · {latestAlert.tf}:{" "}
+                {latestAlert.from} → {latestAlert.to}
               </p>
-              <span className="muted small">{timeLabel(alerts[0].at)}</span>
-              <div>
-                <button
-                  className="smallButton"
-                  onClick={() =>
-                    setAlerts((old) =>
-                      old.filter((item) => item.id !== alerts[0].id)
-                    )
-                  }
-                >
-                  Dismiss
-                </button>
-              </div>
+              <p className="muted small">{dateText(latestAlert.at)}</p>
+              <button
+                className="smallButton"
+                onClick={() =>
+                  setAlerts((old) =>
+                    old.filter((v) => v.id !== latestAlert.id)
+                  )
+                }
+              >
+                Dismiss
+              </button>
             </div>
           )}
         </section>
 
-        {loading && <div className="panel">Loading analysis...</div>}
-        {error && (
-          <div className="panel errorBox" role="alert">
-            <strong>Analysis API Error</strong>
-            <p>{error}</p>
-            <button className="smallButton" onClick={() => void refreshSelected()}>
-              Retry
+        <section className="panel">
+          <div className="sectionTitle">
+            <h2>{coin} Market Overview</h2>
+            {data && (
+              <span
+                className="badge"
+                style={{
+                  color: signalColor(data.signal),
+                  borderColor: signalColor(data.signal),
+                }}
+              >
+                {data.signal}
+              </span>
+            )}
+          </div>
+
+          {loading && <p className="muted">Loading market analysis...</p>}
+          {error && <p className="warning">Analysis: {error}</p>}
+
+          {data && (
+            <>
+              <div className="price">${money(data.price)}</div>
+              <p className="muted">
+                {data.symbol} · {tf} · Analysis Price
+              </p>
+            </>
+          )}
+
+          <div className="controlRow">
+            <label className="checkLabel">
+              <input
+                type="checkbox"
+                checked={auto}
+                onChange={(e) => setAuto(e.target.checked)}
+              />
+              Auto Refresh (1 sec)
+            </label>
+            <button
+              className="smallButton"
+              onClick={() => {
+                void refreshSelected();
+                void refreshTicker();
+                void refreshMulti();
+              }}
+            >
+              Refresh Now
             </button>
           </div>
-        )}
+
+          <p className="muted small">
+            Analysis and ticker polling are attempted every second
+            while the page is visible. Other timeframes refresh every
+            60 seconds. Exchange data may update less frequently.
+          </p>
+        </section>
+
+        <section className="panel">
+          <div className="sectionTitle">
+            <h2>Live Price Verification</h2>
+            <span className={`badge ${tickerFresh ? "green" : "yellow"}`}>
+              {tickerFresh ? "FRESH TICKER" : "NOT VERIFIED"}
+            </span>
+          </div>
+
+          <div className="metricsGrid">
+            <Metric
+              label="Analysis Price"
+              value={data ? `$${money(data.price)}` : "—"}
+            />
+            <Metric
+              label="Independent Ticker Price"
+              value={ticker ? `$${money(ticker.price)}` : "Unavailable"}
+              color="#60a5fa"
+            />
+            <Metric
+              label="Ticker Price Type"
+              value={ticker?.priceType || "Unavailable"}
+              color="#facc15"
+            />
+            <Metric
+              label="Price Difference"
+              value={
+                priceDifference === null
+                  ? "—"
+                  : `${money(priceDifference, 3)}%`
+              }
+              color={priceAligned ? "#22c55e" : "#facc15"}
+            />
+            <Metric
+              label="Ticker Received"
+              value={ageText(ticker?.receivedAt ?? null, now)}
+            />
+            <Metric
+              label="Ticker Source Time"
+              value={dateText(ticker?.sourceAt ?? null)}
+            />
+            <Metric
+              label="Ticker Source Age"
+              value={ageText(ticker?.sourceAt ?? null, now)}
+            />
+            <Metric
+              label="Last Traded Price"
+              value={
+                ticker?.lastPrice
+                  ? `$${money(ticker.lastPrice)}`
+                  : "Not supplied"
+              }
+            />
+            <Metric
+              label="Close Price"
+              value={
+                ticker?.closePrice
+                  ? `$${money(ticker.closePrice)}`
+                  : "Not supplied"
+              }
+            />
+            <Metric
+              label="Mark Price"
+              value={
+                ticker?.markPrice
+                  ? `$${money(ticker.markPrice)}`
+                  : "Not supplied"
+              }
+            />
+            <Metric
+              label="Spot Price"
+              value={
+                ticker?.spotPrice
+                  ? `$${money(ticker.spotPrice)}`
+                  : "Not supplied"
+              }
+            />
+            <Metric
+              label="New Trade Independently Verified"
+              value={ticker?.tradeVerified ? "YES" : "NO"}
+              color={ticker?.tradeVerified ? "#22c55e" : "#facc15"}
+            />
+          </div>
+
+          {tickerError && <p className="warning">Ticker API: {tickerError}</p>}
+
+          <p className="muted small">
+            Fresh ticker means the exchange-reported ticker timestamp
+            is recent. A close price is not proof of a new trade.
+            This API does not independently verify executions.
+          </p>
+        </section>
+
+        <section className="panel">
+          <div className="sectionTitle">
+            <h2>API Data Freshness</h2>
+            <span className={`badge ${candleFresh ? "green" : "yellow"}`}>
+              {candleFresh ? "CANDLE AGE OK" : "CHECK CANDLE"}
+            </span>
+          </div>
+
+          <div className="metricsGrid">
+            <Metric
+              label="Analysis Response Received"
+              value={dateText(data?.receivedAt ?? null)}
+            />
+            <Metric
+              label="Latest Candle Timestamp"
+              value={dateText(lastCandleAt)}
+            />
+            <Metric
+              label="Latest Candle Age"
+              value={ageText(lastCandleAt, now)}
+              color={candleFresh ? "#22c55e" : "#facc15"}
+            />
+            <Metric
+              label="Analysis Source Timestamp"
+              value={dateText(data?.sourceAt ?? null)}
+            />
+            <Metric
+              label="Browser Response Age"
+              value={ageText(data?.receivedAt ?? null, now)}
+            />
+            <Metric label="Selected Candle Interval" value={tf} />
+          </div>
+
+          <p className="muted small">
+            Candle timestamps may indicate candle opening times.
+            Browser receipt time is not an exchange trade timestamp.
+          </p>
+        </section>
 
         {data && (
           <>
             <section className="panel">
-              <div className="sectionTitle">
-                <h2>{coin} Market Overview</h2>
-                <span
-                  className="statusBadge"
-                  style={{
-                    color: colorOf(data.signal),
-                    borderColor: colorOf(data.signal),
-                  }}
-                >
-                  {data.signal}
-                </span>
-              </div>
-              <div className="price">${fmt(data.price)}</div>
-              <p className="muted">{data.symbol} · {tf} · Analysis Price</p>
-              <div className="controlRow">
-                <label className="checkLabel">
-                  <input
-                    type="checkbox"
-                    checked={auto}
-                    onChange={(e) => setAuto(e.target.checked)}
-                  />
-                  Auto Refresh (1 sec)
-                </label>
-                <button
-                  className="smallButton"
-                  onClick={() => {
-                    void refreshSelected();
-                    void refreshTicker();
-                    void refreshMulti();
-                  }}
-                >
-                  Refresh Now
-                </button>
-              </div>
-              <p className="muted small">
-                Analysis and ticker polling attempt every second while visible.
-                Other timeframes refresh every 60 seconds. Exchange updates
-                may arrive less frequently.
-              </p>
-            </section>
-
-            <section className="panel">
-              <div className="sectionTitle">
-                <h2>Live Price Verification</h2>
-                <span className={`statusBadge ${tickerFresh ? "green" : "yellow"}`}>
-                  {tickerFresh ? "TICKER RECEIVED" : "NOT VERIFIED"}
-                </span>
-              </div>
-              <div className="metricsGrid">
-                <Metric label="Analysis Price" value={`$${fmt(data.price)}`} />
-                <Metric
-                  label="Independent Ticker Price"
-                  value={ticker ? `$${fmt(ticker.price)}` : "Unavailable"}
-                  color="#60a5fa"
-                />
-                <Metric
-                  label="Price Difference"
-                  value={priceDifference === null ? "—" : `${fmt(priceDifference, 3)}%`}
-                  color={priceAligned ? "#22c55e" : "#facc15"}
-                />
-                <Metric
-                  label="Ticker Received"
-                  value={ticker ? ageLabel(ticker.receivedAt, now) : "—"}
-                />
-                <Metric
-                  label="Ticker Source Time"
-                  value={ticker ? timeLabel(ticker.sourceAt) : "—"}
-                />
-                <Metric
-                  label="Unchanged Analysis Responses"
-                  value={String(unchanged)}
-                />
-                <Metric
-                  label="Last Analysis Price Change"
-                  value={ageLabel(lastPriceChange, now)}
-                />
-                <Metric
-                  label="Ticker Symbol"
-                  value={ticker?.symbol || "—"}
-                />
-              </div>
-              {tickerError && (
-                <p className="warning">
-                  Ticker API: {tickerError}
-                </p>
-              )}
-              <p className="muted small">
-                The ticker is fetched independently from Delta Exchange India.
-                A successful response does not prove a new trade occurred.
-                Missing source timestamps cannot independently verify
-                exchange-side freshness.
-              </p>
-            </section>
-
-            <section className="panel">
-              <div className="sectionTitle">
-                <h2>API Data Freshness</h2>
-                <span className={`statusBadge ${candleFresh ? "green" : "yellow"}`}>
-                  {candleFresh ? "CANDLE AGE OK" : "CHECK CANDLE AGE"}
-                </span>
-              </div>
-              <div className="metricsGrid">
-                <Metric
-                  label="Analysis Response Received"
-                  value={timeLabel(data.receivedAt)}
-                />
-                <Metric
-                  label="Latest Candle Timestamp"
-                  value={timeLabel(lastCandleAt)}
-                />
-                <Metric
-                  label="Latest Candle Age"
-                  value={ageLabel(lastCandleAt, now)}
-                  color={candleFresh ? "#22c55e" : "#facc15"}
-                />
-                <Metric
-                  label="Analysis Source Timestamp"
-                  value={timeLabel(data.sourceAt)}
-                />
-                <Metric
-                  label="Browser Response Age"
-                  value={ageLabel(data.receivedAt, now)}
-                />
-                <Metric
-                  label="Selected Candle Interval"
-                  value={tf}
-                />
-              </div>
-              <p className="muted small">
-                Candle timestamps often indicate candle opening time.
-                Browser receipt time is not an exchange timestamp.
-                Candle freshness is an approximate check, not proof
-                of tick-by-tick price freshness.
-              </p>
-            </section>
-
-            <section className="panel">
               <h2>Trade Confirmation Gate</h2>
+
               <div className="gateRow">
-                <span className={`statusBadge ${confirmed ? "green" : "yellow"}`}>
+                <span className={`badge ${confirmed ? "green" : "yellow"}`}>
                   {confirmed ? "RULES PASSED" : "NOT CONFIRMED"}
                 </span>
-                <span className="muted">Consensus: {consensus.signal}</span>
+                <span className="muted">
+                  Consensus: {consensus.signal}
+                </span>
               </div>
 
               <div className={`gateBox ${confirmed ? "gateGood" : "gateWarning"}`}>
@@ -1131,36 +1217,40 @@ export default function Home() {
                 </strong>
                 <p>
                   {confirmed
-                    ? "Selected signal matches multi-timeframe consensus and the configured freshness and price-alignment checks."
-                    : "Wait for matching timeframe signals, acceptable candle age, and independently received ticker data."}
+                    ? "The configured directional, candle, ticker timestamp and price-alignment checks passed. This is not independent trade verification."
+                    : "Wait for matching directional signals, fresh snapshots, acceptable candle age and fresh ticker data."}
                 </p>
               </div>
 
               <div className="checks">
-                <div>4 timeframe snapshots: {consensus.loaded}/4</div>
-                <div>Snapshots fresh: {consensus.fresh ? "YES" : "NO"}</div>
+                <div>4 Timeframes: {consensus.loaded}/4</div>
+                <div>Snapshots Fresh: {consensus.fresh ? "YES" : "NO"}</div>
                 <div>Consensus: {consensus.signal}</div>
-                <div>Candle age acceptable: {candleFresh ? "YES" : "NO"}</div>
-                <div>Ticker freshness check: {tickerFresh ? "YES" : "NO"}</div>
-                <div>Price difference ≤ 0.5%: {priceAligned ? "YES" : "NO"}</div>
+                <div>Candle Age OK: {candleFresh ? "YES" : "NO"}</div>
+                <div>Ticker Timestamp Fresh: {tickerFresh ? "YES" : "NO"}</div>
+                <div>Price Difference ≤ 0.5%: {priceAligned ? "YES" : "NO"}</div>
+                <div>Direction Matches: {directionMatches ? "YES" : "NO"}</div>
+                <div>
+                  New Trade Verified: {ticker?.tradeVerified ? "YES" : "NO"}
+                </div>
               </div>
 
               {plan ? (
                 <>
-                  <h3 style={{ color: colorOf(data.signal) }}>
+                  <h3 style={{ color: signalColor(data.signal) }}>
                     {data.signal} — Illustrative Levels
                   </h3>
                   <div className="metricsGrid">
-                    <Metric label="Entry Point" value={`$${fmt(plan.entry)}`} color="#60a5fa" />
-                    <Metric label="Stop Loss" value={`$${fmt(plan.stop)}`} color="#fb7185" />
-                    <Metric label="Target 1 · 1:1" value={`$${fmt(plan.t1)}`} color="#4ade80" />
-                    <Metric label="Target 2 · 1:2" value={`$${fmt(plan.t2)}`} color="#22c55e" />
-                    <Metric label="Target 3 · 1:3" value={`$${fmt(plan.t3)}`} color="#10b981" />
-                    <Metric label="Risk per Unit" value={`$${fmt(plan.risk)}`} />
+                    <Metric label="Entry Point" value={`$${money(plan.entry)}`} color="#60a5fa" />
+                    <Metric label="Stop Loss" value={`$${money(plan.stop)}`} color="#fb7185" />
+                    <Metric label="Target 1 · 1:1" value={`$${money(plan.t1)}`} color="#4ade80" />
+                    <Metric label="Target 2 · 1:2" value={`$${money(plan.t2)}`} color="#22c55e" />
+                    <Metric label="Target 3 · 1:3" value={`$${money(plan.t3)}`} color="#10b981" />
+                    <Metric label="Risk per Unit" value={`$${money(plan.risk)}`} />
                   </div>
                   <p className="muted small">
-                    Hypothetical risk/reward levels only. Fees, slippage,
-                    funding and liquidation risk are excluded.
+                    Hypothetical levels, not trade instructions. Fees,
+                    slippage, funding and liquidation risk are excluded.
                   </p>
                 </>
               ) : (
@@ -1175,7 +1265,8 @@ export default function Home() {
                 <h2>Candlestick Chart</h2>
                 <span className="muted">{zoom} candles</span>
               </div>
-              <div className="buttonRow chartButtons">
+
+              <div className="buttonRow">
                 <button
                   className="smallButton"
                   onClick={() => setZoom((v) => Math.max(15, v - 15))}
@@ -1189,6 +1280,7 @@ export default function Home() {
                   − Zoom Out
                 </button>
               </div>
+
               <Chart data={data} count={zoom} plan={plan} />
             </section>
 
@@ -1196,57 +1288,69 @@ export default function Home() {
               <div className="sectionTitle">
                 <h2>Multi-Timeframe Confirmation</h2>
                 <span
-                  className="statusBadge"
+                  className="badge"
                   style={{
-                    color: colorOf(consensus.signal),
-                    borderColor: colorOf(consensus.signal),
+                    color: signalColor(consensus.signal),
+                    borderColor: signalColor(consensus.signal),
                   }}
                 >
                   {consensus.signal}
                 </span>
               </div>
+
               <div className="timeframeGrid">
                 {TFS.map((t) => {
-                  const result = multi[t];
+                  const item = multi[t];
                   return (
                     <div className="timeframeCard" key={t}>
                       <strong>{t}</strong>
-                      <strong style={{ color: result ? colorOf(result.signal) : "#94a3b8" }}>
-                        {result?.signal || "LOADING"}
+                      <strong
+                        style={{
+                          color: item
+                            ? signalColor(item.signal)
+                            : "#94a3b8",
+                        }}
+                      >
+                        {item?.signal || "LOADING"}
                       </strong>
                       <span className="muted">
-                        {result ? `$${fmt(result.price)}` : "Awaiting data"}
+                        {item ? `$${money(item.price)}` : "Awaiting data"}
                       </span>
                       <span className="muted small">
-                        {result ? `Fetched ${ageLabel(result.receivedAt, now)}` : ""}
+                        {item
+                          ? `Fetched ${ageText(item.receivedAt, now)}`
+                          : ""}
                       </span>
                     </div>
                   );
                 })}
               </div>
+
               <div className="metricsGrid">
                 <Metric label="LONG" value={String(consensus.long)} color="#22c55e" />
                 <Metric label="SHORT" value={String(consensus.short)} color="#fb7185" />
                 <Metric label="HOLD" value={String(consensus.hold)} color="#facc15" />
                 <Metric label="Loaded" value={`${consensus.loaded}/4`} />
               </div>
+
               <p className="muted small">
-                Consensus requires all four timeframes, three matching
-                directional signals and browser snapshots under two minutes old.
+                Consensus requires all four snapshots, at least three
+                matching directional signals and snapshots under two
+                minutes old.
               </p>
             </section>
 
             <section className="panel">
               <h2>Technical Indicators</h2>
               <div className="metricsGrid">
-                <Metric label="RSI" value={fmt(data.rsi)} />
-                <Metric label="MACD Line" value={fmt(data.macd.line, 4)} />
-                <Metric label="MACD Signal" value={fmt(data.macd.signal, 4)} />
-                <Metric label="MACD Histogram" value={fmt(data.macd.histogram, 4)} />
-                <Metric label="EMA 20" value={`$${fmt(data.ema20)}`} color="#fbbf24" />
-                <Metric label="EMA 50" value={`$${fmt(data.ema50)}`} color="#a78bfa" />
-                <Metric label="Support" value={`$${fmt(data.support)}`} color="#22c55e" />
-                <Metric label="Resistance" value={`$${fmt(data.resistance)}`} color="#fb7185" />
+                <Metric label="RSI" value={money(data.rsi)} />
+                <Metric label="MACD Line" value={money(data.macd.line, 4)} />
+                <Metric label="MACD Signal" value={money(data.macd.signal, 4)} />
+                <Metric label="MACD Histogram" value={money(data.macd.histogram, 4)} />
+                <Metric label="EMA 20" value={`$${money(data.ema20)}`} color="#fbbf24" />
+                <Metric label="EMA 50" value={`$${money(data.ema50)}`} color="#a78bfa" />
+                <Metric label="Support" value={`$${money(data.support)}`} color="#22c55e" />
+                <Metric label="Resistance" value={`$${money(data.resistance)}`} color="#fb7185" />
               </div>
             </section>
           </>
@@ -1257,14 +1361,19 @@ export default function Home() {
           <div className="metricsGrid">
             <Metric label="Successful Requests" value={String(health.success)} color="#22c55e" />
             <Metric label="Failed Requests" value={String(health.failed)} color="#fb7185" />
-            <Metric label="Error Rate" value={`${fmt(errorRate, 1)}%`} />
-            <Metric label="Last Response Time" value={health.lastMs === null ? "—" : `${health.lastMs} ms`} />
-            <Metric label="Last Successful Response" value={timeLabel(health.lastSuccess)} />
+            <Metric label="Error Rate" value={`${money(errorRate, 1)}%`} />
+            <Metric
+              label="Last Response Time"
+              value={health.lastMs === null ? "—" : `${health.lastMs} ms`}
+            />
+            <Metric label="Last Successful Response" value={dateText(health.lastSuccess)} />
             <Metric label="Requests Observed" value={String(totalRequests)} />
+            <Metric label="Unchanged Analysis Responses" value={String(unchanged)} />
+            <Metric label="Last Analysis Price Change" value={dateText(lastPriceChange)} />
           </div>
           <p className="muted small">
-            Counts cover analysis and ticker requests observed in this
-            browser session. They do not measure exchange-wide uptime.
+            Browser-session request statistics only. They do not
+            measure exchange-wide availability.
           </p>
         </section>
 
@@ -1275,34 +1384,40 @@ export default function Home() {
               Clear History
             </button>
           </div>
+
           {alerts.length === 0 ? (
-            <p className="muted">
-              No alerts recorded in this session. Use Test Alert to check.
-            </p>
+            <p className="muted">No alerts recorded in this session.</p>
           ) : (
             <div className="historyList">
               {alerts.map((a) => (
                 <div className="historyItem" key={a.id}>
-                  <strong style={{ color: a.test ? "#facc15" : colorOf(a.to) }}>
-                    {a.test ? "TEST" : "LIVE SIGNAL CHANGE"}
+                  <strong
+                    style={{
+                      color: a.test ? "#facc15" : signalColor(a.to),
+                    }}
+                  >
+                    {a.test ? "TEST" : "SIGNAL CHANGE"}
                   </strong>
-                  <span>{a.coin} · {a.tf}: {a.from} → {a.to}</span>
-                  <span className="muted small">{timeLabel(a.at)}</span>
+                  <span>
+                    {a.coin} · {a.tf}: {a.from} → {a.to}
+                  </span>
+                  <span className="muted small">{dateText(a.at)}</span>
                 </div>
               ))}
             </div>
           )}
+
           <p className="muted small">
-            History is kept in memory while this page is open.
-            Reloading the page clears it.
+            Alert history is stored only while this page remains open.
+            Reloading clears it.
           </p>
         </section>
 
         <footer className="footer">
-          <strong>Crypto Signal Pro · Milestone 9.4.1</strong>
+          <strong>Crypto Signal Pro · Milestone 9.4.3</strong>
           <p>
-            Educational technical analysis only. Rule-based confirmation
-            does not guarantee profitability. No trades or orders are placed.
+            Educational technical analysis only. No profitability
+            guarantee. No orders or trades are placed.
           </p>
         </footer>
       </div>
@@ -1343,7 +1458,6 @@ export default function Home() {
           padding: 17px;
           margin-bottom: 16px;
         }
-        .panel > h2:not(:first-child) { margin-top: 22px; }
         .sectionTitle {
           display: flex;
           justify-content: space-between;
@@ -1353,7 +1467,12 @@ export default function Home() {
           margin-bottom: 15px;
         }
         .sectionTitle h2 { margin: 0; }
-        .buttonRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .buttonRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 18px;
+        }
         .choice, .smallButton {
           border: 1px solid #36506e;
           background: #14243a;
@@ -1364,8 +1483,11 @@ export default function Home() {
           font-weight: 700;
           cursor: pointer;
         }
-        .choice.active { background: #2563eb; border-color: #60a5fa; }
-        .statusBadge {
+        .choice.active {
+          background: #2563eb;
+          border-color: #60a5fa;
+        }
+        .badge {
           display: inline-flex;
           align-items: center;
           padding: 8px 12px;
@@ -1376,8 +1498,8 @@ export default function Home() {
           font-weight: 800;
           white-space: nowrap;
         }
-        .statusBadge.green { color: #22c55e; border-color: #22c55e; }
-        .statusBadge.yellow { color: #facc15; border-color: #facc15; }
+        .badge.green { color: #22c55e; border-color: #22c55e; }
+        .badge.yellow { color: #facc15; border-color: #facc15; }
         .price {
           font-size: clamp(30px, 8vw, 46px);
           font-weight: 800;
@@ -1392,8 +1514,17 @@ export default function Home() {
           flex-wrap: wrap;
           margin-top: 15px;
         }
-        .checkLabel { display: flex; align-items: center; gap: 9px; font-weight: 700; }
-        .checkLabel input { width: 18px; height: 18px; accent-color: #2563eb; }
+        .checkLabel {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          font-weight: 700;
+        }
+        .checkLabel input {
+          width: 18px;
+          height: 18px;
+          accent-color: #2563eb;
+        }
         .metricsGrid {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1406,8 +1537,13 @@ export default function Home() {
           padding: 14px;
           min-width: 0;
         }
-        .metricLabel { color: #94a3b8; font-size: 12px; line-height: 1.5; }
-        .metricValue {
+        .metric span {
+          display: block;
+          color: #94a3b8;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .metric strong {
           display: block;
           margin-top: 10px;
           font-size: 17px;
@@ -1431,33 +1567,109 @@ export default function Home() {
           border-radius: 12px;
         }
         .timeframeCard span { overflow-wrap: anywhere; }
-        .chartBox { width: 100%; max-width: 100%; overflow: hidden; background: #101b2d; border-radius: 12px; }
-        .chartSvg { display: block; width: 100%; height: auto; }
-        .legend { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; font-size: 12px; }
-        .chartButtons { margin-bottom: 15px; }
-        .gateRow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-        .gateBox { padding: 15px; border-radius: 12px; margin-bottom: 15px; }
-        .gateBox strong { display: block; font-size: 16px; }
+        .chartBox {
+          width: 100%;
+          max-width: 100%;
+          overflow: hidden;
+          background: #101b2d;
+          border-radius: 12px;
+        }
+        .chartSvg {
+          display: block;
+          width: 100%;
+          height: auto;
+        }
+        .legend {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          padding: 12px;
+          font-size: 12px;
+        }
+        .gateRow {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 16px;
+        }
+        .gateBox {
+          padding: 15px;
+          border-radius: 12px;
+          margin-bottom: 15px;
+        }
+        .gateBox strong {
+          display: block;
+          font-size: 16px;
+        }
         .gateBox p { margin-bottom: 0; }
-        .gateGood { background: #102b23; border: 1px solid #22c55e; color: #4ade80; }
-        .gateWarning { background: #29230e; border: 1px solid #a16207; color: #facc15; }
-        .checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; font-size: 12px; margin-bottom: 15px; color: #cbd5e1; }
-        .warning { color: #facc15; font-size: 13px; overflow-wrap: anywhere; }
-        .errorBox { border-color: #fb7185; color: #fb7185; }
-        .alertBox { background: #17263c; border: 1px solid #fb7185; padding: 15px; border-radius: 12px; margin-top: 15px; }
+        .gateGood {
+          background: #102b23;
+          border: 1px solid #22c55e;
+          color: #4ade80;
+        }
+        .gateWarning {
+          background: #29230e;
+          border: 1px solid #a16207;
+          color: #facc15;
+        }
+        .checks {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+          font-size: 12px;
+          margin-bottom: 15px;
+          color: #cbd5e1;
+        }
+        .warning {
+          color: #facc15;
+          font-size: 13px;
+          overflow-wrap: anywhere;
+        }
+        .alertBox {
+          background: #17263c;
+          border: 1px solid #fb7185;
+          padding: 15px;
+          border-radius: 12px;
+          margin-top: 15px;
+        }
         .alertBox.test { border-color: #facc15; }
         .alertBox .smallButton { margin-top: 12px; }
-        .historyList { display: flex; flex-direction: column; gap: 9px; }
-        .historyItem { display: flex; flex-direction: column; gap: 6px; padding: 13px; background: #101b2d; border: 1px solid #304560; border-radius: 10px; font-size: 13px; }
-        .footer { text-align: center; color: #94a3b8; padding: 15px 6px; font-size: 12px; }
+        .historyList {
+          display: flex;
+          flex-direction: column;
+          gap: 9px;
+        }
+        .historyItem {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 13px;
+          background: #101b2d;
+          border: 1px solid #304560;
+          border-radius: 10px;
+          font-size: 13px;
+        }
+        .footer {
+          text-align: center;
+          color: #94a3b8;
+          padding: 15px 6px;
+          font-size: 12px;
+        }
         .footer strong { color: #e2e8f0; }
         @media (max-width: 700px) {
           .dashboard { padding: 12px 9px 30px; }
           .panel { padding: 13px; border-radius: 13px; }
-          .metricsGrid, .timeframeGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          .choice { flex: 1; text-align: center; padding: 11px 8px; }
+          .metricsGrid, .timeframeGrid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .choice {
+            flex: 1;
+            text-align: center;
+            padding: 11px 8px;
+          }
           .metric { padding: 12px; }
-          .metricValue { font-size: 15px; }
+          .metric strong { font-size: 15px; }
         }
         @media (max-width: 380px) {
           .header { flex-direction: column; }
