@@ -1,12 +1,9 @@
-
 "use client";
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Coin = "BTC" | "ETH";
 type TF = "5m" | "15m" | "1h" | "4h";
 type Signal = "LONG" | "SHORT" | "HOLD";
-
 type Candle = {
   time: number;
   open: number;
@@ -15,7 +12,6 @@ type Candle = {
   close: number;
   volume?: number;
 };
-
 type Analysis = {
   coin: Coin;
   symbol: string;
@@ -25,26 +21,22 @@ type Analysis = {
   support: number;
   resistance: number;
   rsi: number;
-  macd: {
-    line: number;
-    signal: number;
-    histogram: number;
-  };
+  macd: { line: number; signal: number; histogram: number };
   ema20: number;
   ema50: number;
   candles: Candle[];
 };
 
 const TFS: TF[] = ["5m", "15m", "1h", "4h"];
-const REFRESH_MS = 1000;
-const MAX_RETRY_MS = 30000;
+const POLL_MS = 1000;
+const MULTI_MS = 60000;
 
-function num(v: unknown): number {
+const num = (v: unknown) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : NaN;
-}
+};
 
-function fmt(v: unknown, d = 2): string {
+const fmt = (v: unknown, d = 2) => {
   const n = num(v);
   return Number.isFinite(n)
     ? n.toLocaleString("en-US", {
@@ -52,7 +44,7 @@ function fmt(v: unknown, d = 2): string {
         maximumFractionDigits: d,
       })
     : "—";
-}
+};
 
 function normalize(raw: any, coin: Coin, tf: TF): Analysis {
   if (!raw || typeof raw !== "object" || raw.error) {
@@ -93,7 +85,7 @@ function normalize(raw: any, coin: Coin, tf: TF): Analysis {
   const resistance = num(raw.resistance);
 
   if (![price, support, resistance].every(Number.isFinite)) {
-    throw new Error("Price or support/resistance missing");
+    throw new Error("Price/support/resistance missing");
   }
 
   const signal: Signal =
@@ -103,7 +95,7 @@ function normalize(raw: any, coin: Coin, tf: TF): Analysis {
 
   return {
     coin,
-    symbol: String(raw.symbol || `${coin}USD`),
+    symbol: String(raw.symbol || coin + "USD"),
     timeframe: tf,
     price,
     signal,
@@ -126,7 +118,9 @@ function calculateEMA(candles: Candle[], period: number) {
   if (candles.length < period) return result;
 
   let sum = 0;
-  for (let i = 0; i < period; i++) sum += candles[i].close;
+  for (let i = 0; i < period; i++) {
+    sum += candles[i].close;
+  }
 
   let previous = sum / period;
   result[period - 1] = previous;
@@ -140,210 +134,765 @@ function calculateEMA(candles: Candle[], period: number) {
   return result;
 }
 
+/* =========================================
+   MILESTONE 9.2 — PART 2
+   Chart + Trading Levels + Alerts
+   Paste directly after Part 1
+========================================= */
+
+type TradePlan = {
+  direction: Signal;
+  entry: number;
+  stopLoss: number;
+  target1: number;
+  target2: number;
+  target3: number;
+  risk: number;
+  valid: boolean;
+};
+
+function signalColor(signal: Signal): string {
+  if (signal === "LONG") return "#22c55e";
+  if (signal === "SHORT") return "#fb7185";
+  return "#facc15";
+}
+
+/* =========================================
+   ENTRY, STOP LOSS, TARGET CALCULATION
+========================================= */
+
+function calculateTradePlan(
+  data: Analysis
+): TradePlan | null {
+  if (data.signal === "HOLD") return null;
+
+  const entry = data.price;
+
+  if (!Number.isFinite(entry) || entry <= 0) {
+    return null;
+  }
+
+  const support = data.support;
+  const resistance = data.resistance;
+
+  const candles = data.candles.slice(-14);
+
+  const ranges = candles.map(
+    (c) => c.high - c.low
+  );
+
+  const averageRange =
+    ranges.length > 0
+      ? ranges.reduce((a, b) => a + b, 0) /
+        ranges.length
+      : 0;
+
+  const minimumRisk = Math.max(
+    averageRange * 1.5,
+    entry * 0.002
+  );
+
+  if (
+    !Number.isFinite(minimumRisk) ||
+    minimumRisk <= 0
+  ) {
+    return null;
+  }
+
+  let stopLoss: number;
+
+  if (data.signal === "LONG") {
+    stopLoss =
+      support < entry
+        ? Math.min(
+            support - averageRange * 0.2,
+            entry - minimumRisk
+          )
+        : entry - minimumRisk;
+  } else {
+    stopLoss =
+      resistance > entry
+        ? Math.max(
+            resistance + averageRange * 0.2,
+            entry + minimumRisk
+          )
+        : entry + minimumRisk;
+  }
+
+  const risk = Math.abs(entry - stopLoss);
+
+  if (
+    !Number.isFinite(risk) ||
+    risk <= 0 ||
+    stopLoss <= 0
+  ) {
+    return null;
+  }
+
+  const multiplier =
+    data.signal === "LONG" ? 1 : -1;
+
+  const target1 = entry + multiplier * risk;
+  const target2 = entry + multiplier * risk * 2;
+  const target3 = entry + multiplier * risk * 3;
+
+  return {
+    direction: data.signal,
+    entry,
+    stopLoss,
+    target1,
+    target2,
+    target3,
+    risk,
+    valid: true,
+  };
+}
+
+/* =========================================
+   EMA + CANDLESTICK CHART
+========================================= */
+
 function Chart({
   data,
   count,
+  plan,
 }: {
   data: Analysis;
   count: number;
+  plan: TradePlan | null;
 }) {
-  const all = data.candles;
   const candles = useMemo(
-    () => all.slice(-count),
-    [all, count]
+    () => data.candles.slice(-count),
+    [data.candles, count]
   );
 
   const ema20 = useMemo(
-    () => calculateEMA(all, 20).slice(-count),
-    [all, count]
+    () =>
+      calculateEMA(data.candles, 20).slice(-count),
+    [data.candles, count]
   );
+
   const ema50 = useMemo(
-    () => calculateEMA(all, 50).slice(-count),
-    [all, count]
+    () =>
+      calculateEMA(data.candles, 50).slice(-count),
+    [data.candles, count]
   );
 
   const width = 900;
-  const height = 390;
-  const left = 12;
-  const right = 120;
-  const top = 22;
-  const bottom = 42;
-  const pw = width - left - right;
-  const ph = height - top - bottom;
+  const height = 420;
+
+  const left = 16;
+  const right = 125;
+  const top = 25;
+  const bottom = 45;
+
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
 
   const values = [
-    ...candles.flatMap((c) => [c.low, c.high]),
-    ...ema20.filter((v): v is number => v !== null),
-    ...ema50.filter((v): v is number => v !== null),
+    ...candles.flatMap((c) => [
+      c.low,
+      c.high,
+    ]),
+    ...ema20.filter(
+      (v): v is number => v !== null
+    ),
+    ...ema50.filter(
+      (v): v is number => v !== null
+    ),
     data.price,
     data.support,
     data.resistance,
-  ].filter(Number.isFinite);
+  ];
 
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
-  const pad = Math.max((hi - lo) * 0.08, hi * 0.0001);
-  const min = lo - pad;
-  const max = hi + pad;
+  if (plan) {
+    values.push(
+      plan.entry,
+      plan.stopLoss,
+      plan.target1,
+      plan.target2,
+      plan.target3
+    );
+  }
 
-  const y = (v: number) =>
-    top + ((max - v) / (max - min)) * ph;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
 
-  const slot = pw / candles.length;
-  const body = Math.max(2, slot * 0.58);
+  const padding = Math.max(
+    (maxValue - minValue) * 0.08,
+    maxValue * 0.0001
+  );
 
-  function linePath(arr: (number | null)[]) {
+  const minPrice = minValue - padding;
+  const maxPrice = maxValue + padding;
+
+  const y = (price: number) =>
+    top +
+    ((maxPrice - price) /
+      (maxPrice - minPrice)) *
+      plotHeight;
+
+  const slot = plotWidth / candles.length;
+
+  const x = (index: number) =>
+    left + slot * (index + 0.5);
+
+  const bodyWidth = Math.max(
+    2,
+    slot * 0.6
+  );
+
+  function makePath(
+    series: (number | null)[]
+  ): string {
     let path = "";
-    arr.forEach((v, i) => {
-      if (v === null || !Number.isFinite(v)) return;
-      const x = left + slot * (i + 0.5);
-      path += `${path ? " L" : "M"}${x},${y(v)}`;
+    let started = false;
+
+    series.forEach((value, index) => {
+      if (
+        value === null ||
+        !Number.isFinite(value)
+      ) {
+        started = false;
+        return;
+      }
+
+      path += `${
+        started ? "L" : "M"
+      }${x(index)},${y(value)} `;
+
+      started = true;
     });
+
     return path;
   }
 
-  const levels = [
-    { name: "SUP", value: data.support, color: "#22c55e" },
-    { name: "RES", value: data.resistance, color: "#fb7185" },
-    { name: "PRICE", value: data.price, color: "#60a5fa" },
+  const levels: {
+    label: string;
+    price: number;
+    color: string;
+    dash: string;
+  }[] = [
+    {
+      label: "PRICE",
+      price: data.price,
+      color: "#60a5fa",
+      dash: "4 4",
+    },
+    {
+      label: "SUP",
+      price: data.support,
+      color: "#22c55e",
+      dash: "7 5",
+    },
+    {
+      label: "RES",
+      price: data.resistance,
+      color: "#fb7185",
+      dash: "7 5",
+    },
   ];
 
+  if (plan) {
+    levels.push(
+      {
+        label: "ENTRY",
+        price: plan.entry,
+        color: "#38bdf8",
+        dash: "5 4",
+      },
+      {
+        label: "SL",
+        price: plan.stopLoss,
+        color: "#ef4444",
+        dash: "6 4",
+      },
+      {
+        label: "T1",
+        price: plan.target1,
+        color: "#4ade80",
+        dash: "3 5",
+      },
+      {
+        label: "T2",
+        price: plan.target2,
+        color: "#16a34a",
+        dash: "3 5",
+      },
+      {
+        label: "T3",
+        price: plan.target3,
+        color: "#10b981",
+        dash: "3 5",
+      }
+    );
+  }
+
+  // Keep labels from overlapping vertically.
+  const sortedLevels = levels
+    .map((level) => ({
+      ...level,
+      actualY: y(level.price),
+    }))
+    .sort((a, b) => a.actualY - b.actualY);
+
+  const labelY: Record<string, number> = {};
+  const labelGap = 19;
+  const labelTop = top + 10;
+  const labelBottom = height - bottom - 10;
+
+  sortedLevels.forEach((level, index) => {
+    const previous =
+      index > 0
+        ? labelY[sortedLevels[index - 1].label]
+        : labelTop - labelGap;
+
+    labelY[level.label] = Math.max(
+      level.actualY,
+      previous + labelGap,
+      labelTop
+    );
+  });
+
+  if (sortedLevels.length > 0) {
+    const last =
+      sortedLevels[sortedLevels.length - 1];
+
+    const overflow =
+      labelY[last.label] - labelBottom;
+
+    if (overflow > 0) {
+      sortedLevels.forEach((level) => {
+        labelY[level.label] -= overflow;
+      });
+    }
+  }
+
   return (
-    <div className="chartViewport">
+    <div
+      style={{
+        width: "100%",
+        maxWidth: "100%",
+        overflow: "hidden",
+        borderRadius: 12,
+        background: "#101b2d",
+      }}
+    >
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="chartSvg"
+        style={{
+          width: "100%",
+          height: "auto",
+          display: "block",
+        }}
         role="img"
-        aria-label="BTC or ETH candlestick chart with EMA and price levels"
+        aria-label="Candlestick chart with EMA, support, resistance and trading levels"
       >
-        <rect width={width} height={height} fill="#101b2d" />
+        <rect
+          width={width}
+          height={height}
+          fill="#101b2d"
+        />
 
-        {Array.from({ length: 5 }, (_, i) => {
-          const p = min + ((max - min) * i) / 4;
-          return (
-            <g key={i}>
-              <line
-                x1={left}
-                x2={width - right}
-                y1={y(p)}
-                y2={y(p)}
-                stroke="#293b55"
-                strokeDasharray="4 5"
-              />
-              <text
-                x={width - right + 8}
-                y={y(p) + 4}
-                fill="#94a3b8"
-                fontSize="12"
-              >
-                {fmt(p)}
-              </text>
-            </g>
-          );
-        })}
+        {/* Horizontal grid */}
+        {Array.from(
+          { length: 5 },
+          (_, i) =>
+            minPrice +
+            ((maxPrice - minPrice) * i) / 4
+        ).map((price, i) => (
+          <g key={`grid-${i}`}>
+            <line
+              x1={left}
+              x2={width - right}
+              y1={y(price)}
+              y2={y(price)}
+              stroke="#29384e"
+              strokeDasharray="4 5"
+            />
 
+            <text
+              x={width - right + 7}
+              y={y(price) + 4}
+              fill="#94a3b8"
+              fontSize="12"
+            >
+              {fmt(price)}
+            </text>
+          </g>
+        ))}
+
+        {/* Candlesticks */}
         {candles.map((c, i) => {
-          const x = left + slot * (i + 0.5);
-          const green = c.close >= c.open;
-          const color = green ? "#22c55e" : "#ef4444";
+          const up = c.close >= c.open;
+          const color = up
+            ? "#22c55e"
+            : "#ef4444";
+
+          const bodyTop = Math.min(
+            y(c.open),
+            y(c.close)
+          );
+
+          const bodyHeight = Math.max(
+            1.5,
+            Math.abs(
+              y(c.open) - y(c.close)
+            )
+          );
 
           return (
             <g key={`${c.time}-${i}`}>
               <line
-                x1={x}
-                x2={x}
+                x1={x(i)}
+                x2={x(i)}
                 y1={y(c.high)}
                 y2={y(c.low)}
                 stroke={color}
-                strokeWidth="1.5"
+                strokeWidth="1.4"
               />
+
               <rect
-                x={x - body / 2}
-                y={Math.min(y(c.open), y(c.close))}
-                width={body}
-                height={Math.max(
-                  1.5,
-                  Math.abs(y(c.open) - y(c.close))
-                )}
+                x={x(i) - bodyWidth / 2}
+                y={bodyTop}
+                width={bodyWidth}
+                height={bodyHeight}
                 fill={color}
               />
             </g>
           );
         })}
 
+        {/* EMA 20 */}
         <path
-          d={linePath(ema20)}
+          d={makePath(ema20)}
+          fill="none"
           stroke="#fbbf24"
-          strokeWidth="2.5"
-          fill="none"
-        />
-        <path
-          d={linePath(ema50)}
-          stroke="#a78bfa"
-          strokeWidth="2.5"
-          fill="none"
+          strokeWidth="2.3"
         />
 
+        {/* EMA 50 */}
+        <path
+          d={makePath(ema50)}
+          fill="none"
+          stroke="#a78bfa"
+          strokeWidth="2.3"
+        />
+
+        {/* Support, resistance, entry, SL, targets */}
         {levels.map((level) => (
-          <g key={level.name}>
+          <g key={level.label}>
             <line
               x1={left}
               x2={width - right}
-              y1={y(level.value)}
-              y2={y(level.value)}
+              y1={y(level.price)}
+              y2={y(level.price)}
               stroke={level.color}
-              strokeDasharray="6 5"
+              strokeDasharray={level.dash}
               strokeWidth="1.8"
             />
+
             <rect
               x={width - right}
-              y={y(level.value) - 11}
-              width={right - 4}
-              height="22"
+              y={labelY[level.label] - 9}
+              width={right - 3}
+              height={18}
+              rx="3"
               fill="#24364f"
-              rx="4"
             />
+
             <text
               x={width - right + 5}
-              y={y(level.value) + 4}
+              y={labelY[level.label] + 4}
               fill={level.color}
-              fontSize="12"
+              fontSize="11"
               fontWeight="bold"
             >
-              {level.name} {fmt(level.value)}
+              {level.label} {fmt(level.price, 1)}
             </text>
           </g>
         ))}
 
+        {/* Time labels */}
         {candles.map((c, i) => {
-          const step = Math.max(1, Math.ceil(candles.length / 6));
+          const step = Math.max(
+            1,
+            Math.ceil(candles.length / 6)
+          );
+
           if (i % step !== 0) return null;
 
-          const date = new Date(
-            c.time < 1e12 ? c.time * 1000 : c.time
-          );
+          const ms =
+            c.time < 1e12
+              ? c.time * 1000
+              : c.time;
 
           return (
             <text
-              key={c.time}
-              x={left + slot * (i + 0.5)}
+              key={`time-${c.time}`}
+              x={x(i)}
               y={height - 13}
               fill="#94a3b8"
               fontSize="11"
               textAnchor="middle"
             >
-              {date.toLocaleTimeString("en-IN", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZone: "Asia/Kolkata",
-              })}
+              {new Date(ms).toLocaleTimeString(
+                "en-IN",
+                {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  timeZone: "Asia/Kolkata",
+                }
+              )}
             </text>
           );
         })}
       </svg>
+
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 12,
+          padding: 12,
+          fontSize: 12,
+        }}
+      >
+        <span style={{ color: "#fbbf24" }}>
+          ━ EMA 20
+        </span>
+
+        <span style={{ color: "#a78bfa" }}>
+          ━ EMA 50
+        </span>
+
+        <span style={{ color: "#22c55e" }}>
+          ━ Support
+        </span>
+
+        <span style={{ color: "#fb7185" }}>
+          ━ Resistance
+        </span>
+
+        <span style={{ color: "#60a5fa" }}>
+          ━ API Price
+        </span>
+
+        {plan && (
+          <>
+            <span style={{ color: "#ef4444" }}>
+              ━ Stop Loss
+            </span>
+
+            <span style={{ color: "#4ade80" }}>
+              ━ Targets
+            </span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
+
+/* =========================================
+   TRADING LEVEL CARDS
+========================================= */
+
+function TradingLevels({
+  data,
+  plan,
+}: {
+  data: Analysis;
+  plan: TradePlan | null;
+}) {
+  if (!plan) {
+    return (
+      <div
+        style={{
+          padding: 16,
+          background: "#101b2d",
+          borderRadius: 12,
+          color: "#facc15",
+        }}
+      >
+        <strong>WAIT FOR CONFIRMATION</strong>
+        <p style={{ color: "#94a3b8" }}>
+          Current signal is HOLD. No new
+          entry, stop loss or target is
+          suggested.
+        </p>
+      </div>
+    );
+  }
+
+  const items = [
+    {
+      label: "Entry Point",
+      value: plan.entry,
+      color: "#60a5fa",
+    },
+    {
+      label: "Stop Loss",
+      value: plan.stopLoss,
+      color: "#fb7185",
+    },
+    {
+      label: "Target 1 · 1:1",
+      value: plan.target1,
+      color: "#4ade80",
+    },
+    {
+      label: "Target 2 · 1:2",
+      value: plan.target2,
+      color: "#22c55e",
+    },
+    {
+      label: "Target 3 · 1:3",
+      value: plan.target3,
+      color: "#10b981",
+    },
+  ];
+
+  return (
+    <div>
+      <p
+        style={{
+          color: signalColor(plan.direction),
+          fontWeight: "bold",
+        }}
+      >
+        {plan.direction} SETUP
+      </p>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            "repeat(2, minmax(0, 1fr))",
+          gap: 10,
+        }}
+      >
+        {items.map((item) => (
+          <div
+            key={item.label}
+            style={{
+              background: "#101b2d",
+              border: "1px solid #304560",
+              padding: 14,
+              borderRadius: 12,
+              minWidth: 0,
+            }}
+          >
+            <div
+              style={{
+                color: "#94a3b8",
+                fontSize: 12,
+              }}
+            >
+              {item.label}
+            </div>
+
+            <strong
+              style={{
+                display: "block",
+                marginTop: 10,
+                color: item.color,
+                fontSize: 17,
+                overflowWrap: "anywhere",
+              }}
+            >
+              ${fmt(item.value)}
+            </strong>
+          </div>
+        ))}
+      </div>
+
+      <p
+        style={{
+          color: "#94a3b8",
+          fontSize: 12,
+          lineHeight: 1.6,
+        }}
+      >
+        Risk per unit: ${fmt(plan.risk)}.
+        Entry uses the latest API analysis
+        price, not a guaranteed execution
+        price. Targets are hypothetical
+        risk-reward levels and do not
+        include fees or slippage.
+      </p>
+    </div>
+  );
+}
+
+/* =========================================
+   SIGNAL CHANGE ALERT
+========================================= */
+
+function SignalAlert({
+  previous,
+  current,
+  coin,
+  timeframe,
+}: {
+  previous: Signal | null;
+  current: Signal;
+  coin: Coin;
+  timeframe: TF;
+}) {
+  if (!previous || previous === current) {
+    return null;
+  }
+
+  return (
+    <div
+      role="status"
+      style={{
+        background: "#17263c",
+        border: `1px solid ${signalColor(current)}`,
+        borderRadius: 12,
+        padding: 15,
+        marginBottom: 16,
+      }}
+    >
+      <strong
+        style={{
+          color: signalColor(current),
+        }}
+      >
+        SIGNAL CHANGED
+      </strong>
+
+      <p>
+        {coin} · {timeframe}:{" "}
+        <strong>{previous}</strong>
+        {" → "}
+        <strong
+          style={{
+            color: signalColor(current),
+          }}
+        >
+          {current}
+        </strong>
+      </p>
+
+      <p
+        style={{
+          fontSize: 12,
+          color: "#94a3b8",
+        }}
+      >
+        The technical signal changed.
+        Review market conditions before
+        making any trading decision.
+      </p>
+    </div>
+  );
+}
+
+/* =========================================
+   METRIC CARD
+========================================= */
 
 function Metric({
   label,
@@ -355,489 +904,902 @@ function Metric({
   color?: string;
 }) {
   return (
-    <div className="metric">
-      <span className="muted">{label}</span>
-      <strong style={{ color: color || "#e2e8f0" }}>
+    <div
+      className="metric"
+      style={{
+        minWidth: 0,
+        background: "#101b2d",
+        border: "1px solid #304560",
+        borderRadius: 12,
+        padding: 13,
+      }}
+    >
+      <div
+        style={{
+          color: "#94a3b8",
+          fontSize: 12,
+        }}
+      >
+        {label}
+      </div>
+
+      <strong
+        style={{
+          display: "block",
+          marginTop: 10,
+          color: color || "#e2e8f0",
+          fontSize: 17,
+          overflowWrap: "anywhere",
+        }}
+      >
         {value}
       </strong>
     </div>
   );
 }
 
-function signalColor(signal: Signal) {
-  return signal === "LONG"
-    ? "#22c55e"
-    : signal === "SHORT"
-    ? "#fb7185"
-    : "#facc15";
-}
+/* END OF PART 2 */
+
+/* =========================================
+   MILESTONE 9.2 — PART 3
+   Dashboard + Auto Refresh + Mobile CSS
+   Paste directly after Part 2
+========================================= */
 
 export default function Home() {
   const [coin, setCoin] = useState<Coin>("BTC");
   const [tf, setTf] = useState<TF>("15m");
+
   const [data, setData] = useState<Analysis | null>(null);
+
   const [multi, setMulti] = useState<
     Partial<Record<TF, Analysis>>
   >({});
-  const [error, setError] = useState("");
+
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
   const [auto, setAuto] = useState(true);
   const [zoom, setZoom] = useState(60);
-  const [updated, setUpdated] = useState("");
+
+  const [error, setError] = useState("");
+  const [updated, setUpdated] = useState<Date | null>(null);
+
   const [failures, setFailures] = useState(0);
 
+  const [alertInfo, setAlertInfo] = useState<{
+    previous: Signal;
+    current: Signal;
+    coin: Coin;
+    timeframe: TF;
+  } | null>(null);
+
+  const generationRef = useRef(0);
+  const selectedBusyRef = useRef(false);
+  const multiBusyRef = useRef(false);
+  const previousSignalRef = useRef<Signal | null>(null);
+  const latestDataRef = useRef<Analysis | null>(null);
+
   const selectedRef = useRef({ coin, tf });
-  const dataRef = useRef<Partial<Record<TF, Analysis>>>({});
-  const busyRef = useRef(false);
-  const failureRef = useRef(0);
-  const requestRef = useRef(0);
+
+  selectedRef.current = { coin, tf };
 
   const fetchOne = useCallback(
     async (
-      c: Coin,
-      t: TF,
+      selectedCoin: Coin,
+      selectedTf: TF,
       signal?: AbortSignal
     ): Promise<Analysis> => {
-      const query = new URLSearchParams({
-        coin: c,
-        timeframe: t,
+      const url =
+        `/api/analysis?coin=${selectedCoin}` +
+        `&timeframe=${selectedTf}`;
+
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal,
+        headers: {
+          Accept: "application/json",
+        },
       });
 
-      const response = await fetch(
-        `/api/analysis?${query.toString()}`,
-        { cache: "no-store", signal }
-      );
-
-      const text = await response.text();
-      let json: any;
-
-      try {
-        json = JSON.parse(text);
-      } catch {
-        throw new Error(
-          `Non-JSON API response (HTTP ${response.status})`
-        );
-      }
+      const raw = await response.json().catch(() => {
+        throw new Error("API returned invalid JSON");
+      });
 
       if (!response.ok) {
         throw new Error(
-          String(json.error || `HTTP ${response.status}`)
+          String(
+            raw?.error ||
+              raw?.message ||
+              `HTTP ${response.status}`
+          )
         );
       }
 
-      return normalize(json, c, t);
+      return normalize(raw, selectedCoin, selectedTf);
     },
     []
   );
 
+  /* =====================================
+     INITIAL LOAD + COIN/TF SWITCH
+  ===================================== */
+
   useEffect(() => {
-    selectedRef.current = { coin, tf };
-    dataRef.current = {};
+    const generation = ++generationRef.current;
+    const controller = new AbortController();
+
+    selectedBusyRef.current = false;
+    multiBusyRef.current = false;
+    previousSignalRef.current = null;
+    latestDataRef.current = null;
+
     setData(null);
     setMulti({});
     setError("");
-    setLoading(true);
-    failureRef.current = 0;
     setFailures(0);
+    setAlertInfo(null);
+    setUpdated(null);
+    setLoading(true);
+    setRefreshing(false);
 
-    const controller = new AbortController();
-    let active = true;
-    const generation = ++requestRef.current;
-
-    async function initialLoad() {
-      busyRef.current = true;
+    const load = async () => {
+      selectedBusyRef.current = true;
 
       try {
-        const results = await Promise.allSettled(
-          TFS.map((t) => fetchOne(coin, t, controller.signal))
+        const result = await fetchOne(
+          coin,
+          tf,
+          controller.signal
         );
 
-        if (!active || generation !== requestRef.current) return;
-
-        const next: Partial<Record<TF, Analysis>> = {};
-        results.forEach((result, i) => {
-          if (result.status === "fulfilled") {
-            next[TFS[i]] = result.value;
-          }
-        });
-
-        dataRef.current = next;
-        setMulti(next);
-        setData(next[tf] || null);
-
-        if (!next[tf]) {
-          const failed = results[TFS.indexOf(tf)];
-          setError(
-            failed.status === "rejected"
-              ? String(failed.reason?.message || failed.reason)
-              : "Selected timeframe unavailable"
-          );
-          failureRef.current = 1;
-          setFailures(1);
-        } else {
-          setUpdated(
-            new Date().toLocaleTimeString("en-IN", {
-              timeZone: "Asia/Kolkata",
-            })
-          );
+        if (
+          controller.signal.aborted ||
+          generation !== generationRef.current
+        ) {
+          return;
         }
+
+        latestDataRef.current = result;
+        previousSignalRef.current = result.signal;
+
+        setData(result);
+        setMulti({ [tf]: result });
+        setUpdated(new Date());
+        setError("");
+      } catch (err) {
+        if (
+          controller.signal.aborted ||
+          generation !== generationRef.current
+        ) {
+          return;
+        }
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load market analysis"
+        );
       } finally {
-        if (active && generation === requestRef.current) {
-          busyRef.current = false;
+        if (generation === generationRef.current) {
+          selectedBusyRef.current = false;
           setLoading(false);
         }
       }
-    }
+    };
 
-    initialLoad();
+    void load();
 
     return () => {
-      active = false;
       controller.abort();
-      requestRef.current++;
-      busyRef.current = false;
+      generationRef.current++;
     };
   }, [coin, tf, fetchOne]);
 
-  const refresh = useCallback(async () => {
-    if (busyRef.current || document.visibilityState !== "visible") {
+  /* =====================================
+     SELECTED TIMEFRAME AUTO REFRESH
+     Attempts every 1 second
+  ===================================== */
+
+  const refreshSelected = useCallback(async () => {
+    if (
+      selectedBusyRef.current ||
+      (typeof document !== "undefined" &&
+        document.visibilityState === "hidden")
+    ) {
       return;
     }
 
-    busyRef.current = true;
-    const generation = requestRef.current;
-    const { coin: currentCoin, tf: currentTf } = selectedRef.current;
+    const generation = generationRef.current;
+    const selected = selectedRef.current;
+
+    selectedBusyRef.current = true;
+    setRefreshing(true);
 
     try {
-      const result = await fetchOne(currentCoin, currentTf);
+      const result = await fetchOne(
+        selected.coin,
+        selected.tf
+      );
 
-      if (generation !== requestRef.current) return;
+      if (generation !== generationRef.current) {
+        return;
+      }
 
-      dataRef.current = {
-        ...dataRef.current,
-        [currentTf]: result,
-      };
+      const previous = previousSignalRef.current;
+
+      if (
+        previous !== null &&
+        previous !== result.signal
+      ) {
+        setAlertInfo({
+          previous,
+          current: result.signal,
+          coin: selected.coin,
+          timeframe: selected.tf,
+        });
+      }
+
+      previousSignalRef.current = result.signal;
+      latestDataRef.current = result;
 
       setData(result);
-      setMulti({ ...dataRef.current });
+
+      setMulti((old) => ({
+        ...old,
+        [selected.tf]: result,
+      }));
+
+      setUpdated(new Date());
       setError("");
-      failureRef.current = 0;
       setFailures(0);
-      setUpdated(
-        new Date().toLocaleTimeString("en-IN", {
-          timeZone: "Asia/Kolkata",
-        })
+    } catch (err) {
+      if (generation !== generationRef.current) {
+        return;
+      }
+
+      setFailures((old) => Math.min(old + 1, 6));
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Auto refresh failed"
       );
-    } catch (e: any) {
-      if (generation !== requestRef.current) return;
-      failureRef.current += 1;
-      setFailures(failureRef.current);
-      setError(e?.message || "Refresh failed");
     } finally {
-      busyRef.current = false;
+      if (generation === generationRef.current) {
+        selectedBusyRef.current = false;
+        setRefreshing(false);
+      }
     }
   }, [fetchOne]);
 
   useEffect(() => {
     if (!auto) return;
 
+    // On failures, slow down requests.
     const delay = Math.min(
-      REFRESH_MS * Math.pow(2, Math.min(failures, 5)),
-      MAX_RETRY_MS
+      POLL_MS * Math.pow(2, failures),
+      30000
     );
 
-    const timer = setInterval(refresh, delay);
-    return () => clearInterval(timer);
-  }, [auto, refresh, failures]);
+    const timer = window.setInterval(() => {
+      void refreshSelected();
+    }, delay);
 
-  const manualRefresh = () => {
-    refresh();
-  };
+    return () => window.clearInterval(timer);
+  }, [auto, failures, refreshSelected]);
 
-  const confirmations = TFS.map((t) => ({
-    tf: t,
-    data: multi[t],
-  }));
+  /* =====================================
+     MULTI TIMEFRAME AUTO REFRESH
+     Every 60 seconds
+  ===================================== */
 
-  const received = confirmations.filter((x) => x.data).length;
-  const longs = confirmations.filter(
-    (x) => x.data?.signal === "LONG"
-  ).length;
-  const shorts = confirmations.filter(
-    (x) => x.data?.signal === "SHORT"
-  ).length;
-  const holds = confirmations.filter(
-    (x) => x.data?.signal === "HOLD"
-  ).length;
+  const refreshMulti = useCallback(async () => {
+    if (
+      multiBusyRef.current ||
+      (typeof document !== "undefined" &&
+        document.visibilityState === "hidden")
+    ) {
+      return;
+    }
 
-  const overall: Signal =
-    received === 4 && longs >= 3
-      ? "LONG"
-      : received === 4 && shorts >= 3
-      ? "SHORT"
-      : "HOLD";
+    const generation = generationRef.current;
+    const selected = selectedRef.current;
 
-  const trend =
-    data &&
-    Number.isFinite(data.ema20) &&
-    Number.isFinite(data.ema50)
-      ? data.ema20 > data.ema50
-        ? "Bullish"
-        : data.ema20 < data.ema50
-        ? "Bearish"
-        : "Neutral"
-      : "Unknown";
+    multiBusyRef.current = true;
 
-  const supportDistance = data
-    ? ((data.price - data.support) / data.price) * 100
-    : NaN;
-  const resistanceDistance = data
-    ? ((data.resistance - data.price) / data.price) * 100
-    : NaN;
+    try {
+      const otherTimeframes = TFS.filter(
+        (timeframe) => timeframe !== selected.tf
+      );
+
+      const results = await Promise.allSettled(
+        otherTimeframes.map((timeframe) =>
+          fetchOne(selected.coin, timeframe)
+        )
+      );
+
+      if (generation !== generationRef.current) {
+        return;
+      }
+
+      const next: Partial<Record<TF, Analysis>> = {};
+
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          next[otherTimeframes[index]] = result.value;
+        }
+      });
+
+      setMulti((old) => ({
+        ...old,
+        ...next,
+      }));
+    } finally {
+      if (generation === generationRef.current) {
+        multiBusyRef.current = false;
+      }
+    }
+  }, [fetchOne]);
+
+  useEffect(() => {
+    if (!auto) return;
+
+    // Load remaining timeframes shortly
+    // after the selected timeframe.
+    const initialTimer = window.setTimeout(() => {
+      void refreshMulti();
+    }, 2000);
+
+    const interval = window.setInterval(() => {
+      void refreshMulti();
+    }, MULTI_MS);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [auto, coin, tf, refreshMulti]);
+
+  /* =====================================
+     CALCULATED TRADING LEVELS
+  ===================================== */
+
+  const plan = useMemo(() => {
+    return data ? calculateTradePlan(data) : null;
+  }, [data]);
+
+  /* =====================================
+     MULTI TIMEFRAME CONFIRMATION
+  ===================================== */
+
+  const confirmation = useMemo(() => {
+    const available = TFS.map(
+      (timeframe) => multi[timeframe]
+    ).filter(
+      (item): item is Analysis => Boolean(item)
+    );
+
+    const longCount = available.filter(
+      (item) => item.signal === "LONG"
+    ).length;
+
+    const shortCount = available.filter(
+      (item) => item.signal === "SHORT"
+    ).length;
+
+    const holdCount = available.filter(
+      (item) => item.signal === "HOLD"
+    ).length;
+
+    let overall: Signal = "HOLD";
+
+    // Requires all four timeframes and
+    // at least three matching signals.
+    if (available.length === 4) {
+      if (longCount >= 3) overall = "LONG";
+      if (shortCount >= 3) overall = "SHORT";
+    }
+
+    return {
+      longCount,
+      shortCount,
+      holdCount,
+      available: available.length,
+      overall,
+    };
+  }, [multi]);
+
+  const isSelectedConfirmed =
+    data !== null &&
+    data.signal !== "HOLD" &&
+    data.signal === confirmation.overall;
+
+  /* =====================================
+     DASHBOARD RENDER
+  ===================================== */
 
   return (
-    <main className="page">
+    <main className="dashboard">
       <div className="container">
         <header className="header">
           <div>
-            <h1>₿ Crypto Signal Pro</h1>
-            <p className="muted">
-              Delta Exchange India · Milestone 9.1
+            <h1>Crypto Signal Pro</h1>
+            <p>
+              Milestone 9.2 · BTC / ETH Technical
+              Analysis
             </p>
           </div>
-          <span className="apiStatus">● API Analysis</span>
+
+          <span className="liveBadge">
+            <span className="liveDot" />
+            {auto ? "AUTO ON" : "AUTO OFF"}
+          </span>
         </header>
 
+        {/* Coin selection */}
         <section className="panel">
-          <div className="controls">
-            <div className="coinButtons">
-              {(["BTC", "ETH"] as Coin[]).map((c) => (
+          <div className="sectionTitle">
+            <h2>Select Cryptocurrency</h2>
+          </div>
+
+          <div className="buttonRow">
+            {(["BTC", "ETH"] as Coin[]).map(
+              (item) => (
                 <button
-                  key={c}
-                  className={coin === c ? "active" : ""}
-                  onClick={() => setCoin(c)}
+                  key={item}
+                  type="button"
+                  className={
+                    coin === item
+                      ? "choice active"
+                      : "choice"
+                  }
+                  onClick={() => setCoin(item)}
                 >
-                  {c}
+                  {item === "BTC"
+                    ? "₿ Bitcoin"
+                    : "Ξ Ethereum"}
                 </button>
-              ))}
-            </div>
-
-            <select
-              value={tf}
-              onChange={(e) => setTf(e.target.value as TF)}
-            >
-              {TFS.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
+              )
+            )}
           </div>
 
-          <div className="priceRow">
-            <div>
-              <span className="muted">
-                {data?.symbol || `${coin}USD`} · {tf}
-              </span>
-              <h2>{data ? `$${fmt(data.price)}` : "—"}</h2>
-            </div>
-            <div
-              className="signal"
-              style={{
-                color: data ? signalColor(data.signal) : "#94a3b8",
-              }}
-            >
-              {data?.signal || "—"}
-            </div>
+          <div className="sectionTitle">
+            <h2>Select Timeframe</h2>
           </div>
 
-          <p className="muted status">
-            {loading ? "Loading analysis..." : "Last checked"}
-            {updated ? ` · ${updated} IST` : ""}
-          </p>
-
-          <div className="actions">
-            <button onClick={manualRefresh} disabled={loading}>
-              ↻ Refresh Now
-            </button>
-            <label>
-              <input
-                type="checkbox"
-                checked={auto}
-                onChange={(e) => setAuto(e.target.checked)}
-              />
-              Auto Refresh (1 sec)
-            </label>
-          </div>
-
-          <p className="hint">
-            Refreshes the selected timeframe every second while the
-            page is visible. Candles update when the API supplies
-            new completed candles.
-          </p>
-        </section>
-
-        {error && (
-          <section className="panel error">
-            <strong>API Error</strong>
-            <p>{error}</p>
-            <p>Retry delay increases after repeated failures.</p>
-          </section>
-        )}
-
-        <section className="panel">
-          <div className="sectionHeading">
-            <h3>Candlestick Chart</h3>
-            <div className="zoomControls">
+          <div className="buttonRow">
+            {TFS.map((item) => (
               <button
-                onClick={() => setZoom((v) => Math.max(20, v - 20))}
-                disabled={zoom <= 20}
+                key={item}
+                type="button"
+                className={
+                  tf === item
+                    ? "choice active"
+                    : "choice"
+                }
+                onClick={() => setTf(item)}
               >
-                +
+                {item}
               </button>
-              <span>{zoom} candles</span>
-              <button
-                onClick={() => setZoom((v) => Math.min(120, v + 20))}
-                disabled={zoom >= 120}
-              >
-                −
-              </button>
-            </div>
-          </div>
-
-          {data ? (
-            <>
-              <Chart data={data} count={zoom} />
-              <div className="legend">
-                <span style={{ color: "#fbbf24" }}>━ EMA 20</span>
-                <span style={{ color: "#a78bfa" }}>━ EMA 50</span>
-                <span style={{ color: "#22c55e" }}>━ Support</span>
-                <span style={{ color: "#fb7185" }}>━ Resistance</span>
-                <span style={{ color: "#60a5fa" }}>━ API Price</span>
-              </div>
-              <p className="hint">
-                Use + and − to zoom. The chart stays inside the
-                mobile screen.
-              </p>
-            </>
-          ) : (
-            <div className="empty">Waiting for candles...</div>
-          )}
-        </section>
-
-        <section className="metricsGrid">
-          <Metric
-            label="Support"
-            value={data ? `$${fmt(data.support)}` : "—"}
-            color="#22c55e"
-          />
-          <Metric
-            label="Resistance"
-            value={data ? `$${fmt(data.resistance)}` : "—"}
-            color="#fb7185"
-          />
-          <Metric
-            label="Price − Support"
-            value={fmt(supportDistance) + "%"}
-          />
-          <Metric
-            label="Resistance − Price"
-            value={fmt(resistanceDistance) + "%"}
-          />
-        </section>
-
-        <section className="panel">
-          <div className="sectionHeading">
-            <h3>Multi-Timeframe Confirmation</h3>
-            <span className="muted">{received}/4 received</span>
-          </div>
-
-          <div className="tfGrid">
-            {confirmations.map((item) => (
-              <div className="tfRow" key={item.tf}>
-                <strong>{item.tf}</strong>
-                <span
-                  style={{
-                    color: item.data
-                      ? signalColor(item.data.signal)
-                      : "#94a3b8",
-                  }}
-                >
-                  {item.data
-                    ? `${item.data.signal} · RSI ${fmt(item.data.rsi)}`
-                    : "Unavailable"}
-                </span>
-              </div>
             ))}
           </div>
+        </section>
+
+        {/* Status and errors */}
+        {loading && (
+          <div className="notice">
+            Loading {coin} {tf} analysis...
+          </div>
+        )}
+
+        {error && (
+          <div className="errorBox" role="alert">
+            <strong>API Error</strong>
+            <p>{error}</p>
+
+            <button
+              type="button"
+              className="smallButton"
+              onClick={() => {
+                void refreshSelected();
+                void refreshMulti();
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Signal alert */}
+        {alertInfo && (
+          <div>
+            <SignalAlert
+              previous={alertInfo.previous}
+              current={alertInfo.current}
+              coin={alertInfo.coin}
+              timeframe={alertInfo.timeframe}
+            />
+
+            <button
+              type="button"
+              className="smallButton"
+              onClick={() => setAlertInfo(null)}
+            >
+              Dismiss Alert
+            </button>
+          </div>
+        )}
+
+        {data && (
+          <>
+            {/* Live price */}
+            <section className="panel">
+              <div className="sectionTitle">
+                <h2>
+                  {coin} Market Overview
+                </h2>
+
+                <span
+                  className="signalBadge"
+                  style={{
+                    color: signalColor(data.signal),
+                    borderColor: signalColor(
+                      data.signal
+                    ),
+                  }}
+                >
+                  {data.signal}
+                </span>
+              </div>
+
+              <div className="price">
+                ${fmt(data.price)}
+              </div>
+
+              <p className="muted">
+                {data.symbol} · {tf} · API
+                Analysis Price
+              </p>
+
+              <div className="statusRow">
+                <span>
+                  {refreshing
+                    ? "Refreshing..."
+                    : "Last successful update:"}
+                </span>
+
+                <strong>
+                  {updated
+                    ? updated.toLocaleTimeString(
+                        "en-IN",
+                        {
+                          timeZone:
+                            "Asia/Kolkata",
+                        }
+                      )
+                    : "—"}
+                </strong>
+              </div>
+
+              <div className="controlRow">
+                <label className="autoLabel">
+                  <input
+                    type="checkbox"
+                    checked={auto}
+                    onChange={(event) =>
+                      setAuto(
+                        event.target.checked
+                      )
+                    }
+                  />
+
+                  Auto Refresh (1 sec)
+                </label>
+
+                <button
+                  type="button"
+                  className="smallButton"
+                  disabled={refreshing}
+                  onClick={() => {
+                    void refreshSelected();
+                    void refreshMulti();
+                  }}
+                >
+                  Refresh Now
+                </button>
+              </div>
+
+              <p className="muted smallText">
+                Selected timeframe is polled
+                approximately every second
+                while this page is visible.
+                Other timeframes refresh every
+                60 seconds. API and server
+                delays may slow updates.
+              </p>
+            </section>
+
+            {/* Trading levels */}
+            <section className="panel">
+              <div className="sectionTitle">
+                <h2>
+                  Entry · Stop Loss · Targets
+                </h2>
+              </div>
+
+              <TradingLevels
+                data={data}
+                plan={plan}
+              />
+
+              {plan && (
+                <p
+                  className={
+                    isSelectedConfirmed
+                      ? "confirmed"
+                      : "warning"
+                  }
+                >
+                  {isSelectedConfirmed
+                    ? "Multi-timeframe direction matches the selected signal."
+                    : "Selected signal is not yet confirmed by the multi-timeframe consensus."}
+                </p>
+              )}
+            </section>
+
+            {/* Candlestick chart */}
+            <section className="panel">
+              <div className="sectionTitle">
+                <h2>
+                  Candlestick Chart
+                </h2>
+
+                <span className="muted">
+                  {zoom} candles
+                </span>
+              </div>
+
+              <div className="chartControls">
+                <button
+                  type="button"
+                  className="smallButton"
+                  onClick={() =>
+                    setZoom((old) =>
+                      Math.max(15, old - 15)
+                    )
+                  }
+                >
+                  + Zoom In
+                </button>
+
+                <button
+                  type="button"
+                  className="smallButton"
+                  onClick={() =>
+                    setZoom((old) =>
+                      Math.min(150, old + 15)
+                    )
+                  }
+                >
+                  − Zoom Out
+                </button>
+              </div>
+
+              <div className="chartViewport">
+                <Chart
+                  data={data}
+                  count={zoom}
+                  plan={plan}
+                />
+              </div>
+
+              <p className="muted smallText">
+                EMA 20/50, support,
+                resistance, entry, stop loss
+                and targets are displayed
+                when available.
+              </p>
+            </section>
+
+            {/* Multi-timeframe confirmation */}
+            <section className="panel">
+              <div className="sectionTitle">
+                <h2>
+                  Multi-Timeframe Confirmation
+                </h2>
+
+                <span
+                  className="signalBadge"
+                  style={{
+                    color: signalColor(
+                      confirmation.overall
+                    ),
+                    borderColor: signalColor(
+                      confirmation.overall
+                    ),
+                  }}
+                >
+                  {confirmation.overall}
+                </span>
+              </div>
+
+              <div className="timeframeGrid">
+                {TFS.map((item) => {
+                  const result = multi[item];
+
+                  return (
+                    <div
+                      key={item}
+                      className="timeframeCard"
+                    >
+                      <strong>{item}</strong>
+
+                      <span
+                        style={{
+                          color: result
+                            ? signalColor(
+                                result.signal
+                              )
+                            : "#94a3b8",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {result
+                          ? result.signal
+                          : "LOADING"}
+                      </span>
+
+                      <small>
+                        {result
+                          ? `$${fmt(
+                              result.price
+                            )}`
+                          : "Awaiting data"}
+                      </small>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="summaryGrid">
+                <Metric
+                  label="LONG"
+                  value={String(
+                    confirmation.longCount
+                  )}
+                  color="#22c55e"
+                />
+
+                <Metric
+                  label="SHORT"
+                  value={String(
+                    confirmation.shortCount
+                  )}
+                  color="#fb7185"
+                />
+
+                <Metric
+                  label="HOLD"
+                  value={String(
+                    confirmation.holdCount
+                  )}
+                  color="#facc15"
+                />
+
+                <Metric
+                  label="Timeframes Loaded"
+                  value={`${
+                    confirmation.available
+                  } / 4`}
+                />
+              </div>
+
+              <p className="muted smallText">
+                Consensus requires all four
+                timeframes and at least three
+                matching LONG or SHORT
+                signals. HOLD also indicates
+                insufficient confirmation.
+              </p>
+            </section>
+
+            {/* Technical indicators */}
+            <section className="panel">
+              <div className="sectionTitle">
+                <h2>
+                  Technical Indicators
+                </h2>
+              </div>
+
+              <div className="metricsGrid">
+                <Metric
+                  label="RSI"
+                  value={fmt(data.rsi)}
+                  color={
+                    data.rsi >= 70
+                      ? "#fb7185"
+                      : data.rsi <= 30
+                      ? "#22c55e"
+                      : "#e2e8f0"
+                  }
+                />
+
+                <Metric
+                  label="MACD Line"
+                  value={fmt(
+                    data.macd.line,
+                    4
+                  )}
+                />
+
+                <Metric
+                  label="MACD Signal"
+                  value={fmt(
+                    data.macd.signal,
+                    4
+                  )}
+                />
+
+                <Metric
+                  label="MACD Histogram"
+                  value={fmt(
+                    data.macd.histogram,
+                    4
+                  )}
+                />
+
+                <Metric
+                  label="EMA 20"
+                  value={`$${fmt(
+                    data.ema20
+                  )}`}
+                  color="#fbbf24"
+                />
+
+                <Metric
+                  label="EMA 50"
+                  value={`$${fmt(
+                    data.ema50
+                  )}`}
+                  color="#a78bfa"
+                />
+
+                <Metric
+                  label="Support"
+                  value={`$${fmt(
+                    data.support
+                  )}`}
+                  color="#22c55e"
+                />
+
+                <Metric
+                  label="Resistance"
+                  value={`$${fmt(
+                    data.resistance
+                  )}`}
+                  color="#fb7185"
+                />
+              </div>
+            </section>
+          </>
+        )}
+
+        <footer className="footer">
+          <strong>
+            Crypto Signal Pro · Milestone 9.2
+          </strong>
 
           <p>
-            Confirmation:{" "}
-            <strong style={{ color: signalColor(overall) }}>
-              {overall}
-            </strong>
+            Educational technical analysis
+            only. Trading cryptocurrencies
+            involves substantial risk.
+            Signals, entry levels, stop
+            losses and targets are not
+            guarantees. Consider fees,
+            slippage, volatility and your
+            own risk tolerance.
           </p>
-          <p className="muted">
-            {longs} LONG · {shorts} SHORT · {holds} HOLD
-          </p>
-          <p className="hint">
-            Other timeframes are snapshots loaded when the coin or
-            timeframe changes. They are not refreshed every second.
-            A directional confirmation requires at least 3 matching
-            signals and all 4 timeframes available.
-          </p>
-        </section>
-
-        <section className="panel">
-          <h3>Technical Indicators · {tf}</h3>
-          <div className="metricsGrid inner">
-            <Metric label="RSI (14)" value={fmt(data?.rsi)} />
-            <Metric
-              label="MACD Line"
-              value={fmt(data?.macd.line, 4)}
-            />
-            <Metric
-              label="MACD Signal"
-              value={fmt(data?.macd.signal, 4)}
-            />
-            <Metric
-              label="MACD Histogram"
-              value={fmt(data?.macd.histogram, 4)}
-            />
-            <Metric label="EMA 20" value={fmt(data?.ema20)} />
-            <Metric label="EMA 50" value={fmt(data?.ema50)} />
-            <Metric label="EMA Trend" value={trend} />
-            <Metric
-              label="Selected Signal"
-              value={data?.signal || "—"}
-              color={data ? signalColor(data.signal) : undefined}
-            />
-          </div>
-        </section>
-
-        <section className="panel">
-          <h3>Signal Interpretation</h3>
-          {data ? (
-            <p>
-              Selected {tf}: <strong>{data.signal}</strong>.{" "}
-              {data.signal === "LONG"
-                ? "The API indicates a bullish setup."
-                : data.signal === "SHORT"
-                ? "The API indicates a bearish setup."
-                : "No clear directional entry is indicated."}
-            </p>
-          ) : (
-            <p className="muted">Waiting for analysis...</p>
-          )}
-          <p className="hint">
-            Confirm price action and manage risk before making
-            trading decisions.
-          </p>
-        </section>
-
-        <footer>
-          Educational technical analysis only. No guaranteed
-          signals and no automatic order placement.
         </footer>
       </div>
 
@@ -845,232 +1807,347 @@ export default function Home() {
         * {
           box-sizing: border-box;
         }
-        .page {
-          width: 100%;
-          max-width: 100%;
+
+        .dashboard {
           min-height: 100vh;
-          overflow-x: clip;
-          background: #091325;
+          width: 100%;
+          max-width: 100vw;
+          overflow-x: hidden;
+          background: #07111f;
           color: #e2e8f0;
-          font-family: Arial, sans-serif;
-          padding: 14px;
+          padding: 18px 12px 40px;
+          font-family:
+            Arial, Helvetica, sans-serif;
         }
+
         .container {
           width: 100%;
           max-width: 1100px;
-          min-width: 0;
           margin: 0 auto;
         }
+
         .header {
           display: flex;
           justify-content: space-between;
-          align-items: center;
+          align-items: flex-start;
           gap: 12px;
-          flex-wrap: wrap;
-          margin-bottom: 22px;
+          margin-bottom: 18px;
         }
+
         h1 {
-          font-size: clamp(22px, 5vw, 30px);
+          font-size: clamp(23px, 5vw, 34px);
           margin: 0 0 8px;
+          color: #f8fafc;
         }
+
         h2 {
-          font-size: clamp(25px, 6vw, 38px);
-          margin: 12px 0;
-          overflow-wrap: anywhere;
-        }
-        h3 {
-          font-size: 19px;
+          font-size: 17px;
           margin: 0;
         }
+
         p {
           line-height: 1.6;
         }
-        .muted,
-        .hint {
+
+        .header p {
+          margin: 0;
+          font-size: 13px;
           color: #94a3b8;
         }
-        .hint {
-          font-size: 12px;
-          line-height: 1.6;
+
+        .liveBadge {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 8px 10px;
+          border-radius: 999px;
+          border: 1px solid #1e9f75;
+          color: #4ade80;
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
         }
-        .apiStatus {
-          color: #22c55e;
-          font-size: 13px;
+
+        .liveDot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          background: #22c55e;
         }
+
         .panel {
-          background: #17263c;
-          border: 1px solid #304560;
-          border-radius: 18px;
-          padding: 18px;
-          margin-bottom: 18px;
           width: 100%;
           min-width: 0;
-          overflow: hidden;
+          background: #0d1a2b;
+          border: 1px solid #26384f;
+          border-radius: 16px;
+          padding: 17px;
+          margin-bottom: 16px;
         }
-        .controls,
-        .priceRow,
-        .sectionHeading,
-        .actions {
+
+        .sectionTitle {
           display: flex;
           align-items: center;
           justify-content: space-between;
           flex-wrap: wrap;
-          gap: 12px;
+          gap: 10px;
+          margin-bottom: 15px;
         }
-        .coinButtons,
-        .zoomControls {
+
+        .sectionTitle:not(:first-child) {
+          margin-top: 18px;
+        }
+
+        .buttonRow {
           display: flex;
-          align-items: center;
+          flex-wrap: wrap;
           gap: 8px;
         }
-        button,
-        select {
-          background: #243852;
-          border: 1px solid #38516f;
-          border-radius: 10px;
-          padding: 11px 14px;
+
+        .choice,
+        .smallButton {
+          border: 1px solid #36506e;
+          background: #14243a;
           color: #e2e8f0;
-          font-size: 14px;
+          border-radius: 10px;
+          padding: 11px 15px;
+          font-weight: 700;
           cursor: pointer;
+          font-size: 13px;
         }
-        button.active {
+
+        .choice.active {
           background: #2563eb;
           border-color: #60a5fa;
+          color: white;
         }
+
         button:disabled {
-          opacity: 0.45;
+          opacity: 0.5;
           cursor: not-allowed;
         }
-        .priceRow {
-          margin-top: 22px;
-        }
-        .signal {
-          padding: 12px 16px;
-          border: 1px solid #38516f;
-          border-radius: 12px;
-          font-size: 21px;
-          font-weight: bold;
-        }
-        .status {
-          font-size: 13px;
-        }
-        .actions {
-          justify-content: flex-start;
-        }
-        .actions label {
-          display: flex;
+
+        .signalBadge {
+          display: inline-flex;
           align-items: center;
-          gap: 7px;
-          font-size: 13px;
-        }
-        .zoomControls button {
+          border: 1px solid;
+          border-radius: 999px;
           padding: 7px 12px;
-          font-size: 18px;
-        }
-        .zoomControls span {
+          font-weight: 800;
           font-size: 12px;
+        }
+
+        .price {
+          font-size: clamp(
+            28px,
+            8vw,
+            46px
+          );
+          font-weight: 800;
+          color: #f8fafc;
+          overflow-wrap: anywhere;
+        }
+
+        .muted {
           color: #94a3b8;
         }
+
+        .smallText {
+          font-size: 12px;
+        }
+
+        .statusRow {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin: 18px 0;
+          font-size: 13px;
+        }
+
+        .controlRow {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .autoLabel {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .autoLabel input {
+          width: 18px;
+          height: 18px;
+          accent-color: #2563eb;
+        }
+
+        .notice {
+          padding: 15px;
+          margin-bottom: 15px;
+          background: #14243a;
+          border-radius: 12px;
+        }
+
+        .errorBox {
+          background: #351c2a;
+          border: 1px solid #fb7185;
+          padding: 15px;
+          border-radius: 12px;
+          margin-bottom: 15px;
+        }
+
+        .errorBox p {
+          overflow-wrap: anywhere;
+        }
+
+        .chartControls {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 14px;
+        }
+
         .chartViewport {
           width: 100%;
           max-width: 100%;
+          min-width: 0;
           overflow: hidden;
-          margin-top: 16px;
-          border-radius: 10px;
-          background: #101b2d;
         }
-        .chartSvg {
-          display: block;
-          width: 100%;
-          height: auto;
-          max-width: 100%;
-        }
-        .legend {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          margin-top: 12px;
-          font-size: 12px;
-        }
-        .metricsGrid {
+
+        .timeframeGrid {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 12px;
+          grid-template-columns:
+            repeat(
+              4,
+              minmax(0, 1fr)
+            );
+          gap: 9px;
           margin-bottom: 18px;
         }
-        .metricsGrid.inner {
-          margin: 18px 0 0;
-        }
-        .metric {
-          min-width: 0;
-          background: #17263c;
-          border: 1px solid #304560;
-          border-radius: 12px;
-          padding: 15px;
+
+        .timeframeCard {
           display: flex;
           flex-direction: column;
           gap: 10px;
+          min-width: 0;
+          background: #101b2d;
+          border: 1px solid #304560;
+          border-radius: 12px;
+          padding: 13px;
         }
-        .metric strong {
-          font-size: 18px;
+
+        .timeframeCard small {
+          color: #94a3b8;
           overflow-wrap: anywhere;
         }
-        .tfGrid {
+
+        .summaryGrid {
           display: grid;
-          gap: 9px;
-          margin: 18px 0;
+          grid-template-columns:
+            repeat(
+              4,
+              minmax(0, 1fr)
+            );
+          gap: 10px;
         }
-        .tfRow {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 8px;
-          background: #101b2d;
-          border: 1px solid #293b55;
-          border-radius: 10px;
-          padding: 13px;
-          font-size: 14px;
+
+        .metricsGrid {
+          display: grid;
+          grid-template-columns:
+            repeat(
+              4,
+              minmax(0, 1fr)
+            );
+          gap: 10px;
         }
-        .error {
-          border-color: #ef4444;
-          color: #fda4af;
+
+        .confirmed {
+          color: #4ade80;
+          font-size: 13px;
+          font-weight: 700;
         }
-        .empty {
-          min-height: 220px;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          color: #94a3b8;
+
+        .warning {
+          color: #facc15;
+          font-size: 13px;
+          font-weight: 700;
         }
-        footer {
+
+        .footer {
           text-align: center;
           color: #94a3b8;
+          padding: 15px 5px;
           font-size: 12px;
-          padding: 15px;
         }
-        @media (min-width: 800px) {
-          .metricsGrid {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-          }
+
+        .footer strong {
+          color: #e2e8f0;
         }
-        @media (max-width: 480px) {
-          .page {
-            padding: 10px;
+
+        @media (max-width: 700px) {
+          .dashboard {
+            padding: 12px 9px 30px;
           }
+
           .panel {
             padding: 13px;
+            border-radius: 13px;
           }
-          .metric {
-            padding: 12px;
+
+          .timeframeGrid,
+          .summaryGrid,
+          .metricsGrid {
+            grid-template-columns:
+              repeat(
+                2,
+                minmax(0, 1fr)
+              );
           }
-          .metric strong {
-            font-size: 15px;
+
+          .header {
+            align-items: flex-start;
           }
-          .tfRow {
-            font-size: 12px;
+
+          .liveBadge {
+            padding: 7px 8px;
+            font-size: 10px;
+          }
+
+          .choice {
+            flex: 1;
+            text-align: center;
+            padding: 11px 10px;
+          }
+        }
+
+        @media (max-width: 380px) {
+          .header {
+            flex-direction: column;
+          }
+
+          .price {
+            font-size: 29px;
+          }
+
+          .panel {
+            padding: 11px;
+          }
+
+          .timeframeCard {
+            padding: 10px;
           }
         }
       `}</style>
     </main>
   );
 }
+
+/* =========================================
+   END OF MILESTONE 9.2
+========================================= */
