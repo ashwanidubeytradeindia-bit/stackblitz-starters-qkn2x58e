@@ -1,587 +1,379 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type Coin = "BTC" | "ETH";
 type Timeframe = "5m" | "15m" | "1h" | "4h";
-type Signal = "LONG" | "SHORT" | "HOLD";
 
-type Analysis = {
-  coin: Coin;
-  symbol: string;
-  timeframe: Timeframe;
-  price: number;
-  signal: Signal;
-  support: number;
-  resistance: number;
-  rsi: number;
-  macd: {
-    line: number;
-    signal: number;
-    histogram: number;
-  };
-  ema20: number;
-  ema50: number;
-  ema200: number;
-  candleCount: number;
-  lastCandleTime?: string;
-  updatedAt: string;
-  status: "connected";
-  priceSource?: string;
-  analysisType?: string;
+type FrameData = {
+  price?: number;
+  rsi?: number;
+  macd?: number;
+  macd_signal?: number;
+  ema20?: number;
+  ema50?: number;
+  ema200?: number;
+  support?: number;
+  resistance?: number;
+  direction?: string;
+  atr14?: number;
+  adx14?: number;
 };
 
-const COINS: Coin[] = ["BTC", "ETH"];
-const TIMEFRAMES: Timeframe[] = ["5m", "15m", "1h", "4h"];
-const REFRESH_MS = 30_000;
+type Analysis = {
+  symbol: string;
+  signal: string;
+  confirmation: string;
+  timeframes: Partial<Record<Timeframe, FrameData>>;
+  entry?: number | null;
+  stop_loss?: number | null;
+  target1?: number | null;
+  target2?: number | null;
+  target3?: number | null;
+  confidence?: string;
+  method?: string;
+};
 
-function isRecord(
-  value: unknown
-): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value)
-  );
-}
+const FRAMES: Timeframe[] = ["5m", "15m", "1h", "4h"];
 
-function isNumber(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value)
-  );
-}
-
-function parseAnalysis(value: unknown): Analysis {
-  if (!isRecord(value)) {
-    throw new Error("Invalid API response");
+function format(value: unknown, digits = 2): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "--";
   }
-
-  if (value.status !== "connected") {
-    throw new Error(
-      typeof value.error === "string"
-        ? value.error
-        : "API disconnected"
-    );
-  }
-
-  if (!isRecord(value.macd)) {
-    throw new Error("MACD data missing");
-  }
-
-  const required = [
-    "price",
-    "support",
-    "resistance",
-    "rsi",
-    "ema20",
-    "ema50",
-    "ema200",
-    "candleCount",
-  ];
-
-  if (
-    !required.every
-(key) =>
-  isNumber((value.macd as Record<string, unknown>)[key])
- ||
-    !["line", "signal", "histogram"].every(
-      (key) => isNumber(value.macd[key])
-    ) ||
-    !COINS.includes(value.coin as Coin) ||
-    !TIMEFRAMES.includes(value.timeframe as Timeframe) ||
-    !["LONG", "SHORT", "HOLD"].includes(
-      String(value.signal)
-    ) ||
-    typeof value.symbol !== "string" ||
-    typeof value.updatedAt !== "string"
-  ) {
-    throw new Error(
-      "Incomplete or invalid indicator data"
-    );
-  }
-
-  return value as Analysis;
-}
-
-function formatNumber(
-  value: number,
-  digits = 2
-): string {
-  return new Intl.NumberFormat("en-US", {
+  return value.toLocaleString("en-US", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
-  }).format(value);
-}
-
-function formatTime(value?: string): string {
-  if (!value) return "—";
-
-  const date = new Date(value);
-
-  return Number.isNaN(date.getTime())
-    ? "—"
-    : date.toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "medium",
-      });
+  });
 }
 
 export default function Home() {
   const [coin, setCoin] = useState<Coin>("BTC");
-
-  const [timeframe, setTimeframe] =
-    useState<Timeframe>("15m");
-
-  const [data, setData] =
-    useState<Analysis | null>(null);
-
+  const [timeframe, setTimeframe] = useState<Timeframe>("15m");
+  const [data, setData] = useState<Analysis | null>(null);
   const [loading, setLoading] = useState(true);
-
-  const [error, setError] =
-    useState<string | null>(null);
-
-  const [autoRefresh, setAutoRefresh] =
-    useState(true);
-
-  const requestId = useRef(0);
-
-  const controller =
-    useRef<AbortController | null>(null);
+  const [error, setError] = useState("");
+  const [updated, setUpdated] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
   const load = useCallback(async () => {
-    const id = ++requestId.current;
-
-    controller.current?.abort();
-
-    const abort = new AbortController();
-    controller.current = abort;
-
-    setLoading(true);
-    setError(null);
-
     try {
-      const response = await fetch(
-        `/api/analysis?coin=${coin}&timeframe=${timeframe}`,
-        {
-          cache: "no-store",
-          signal: abort.signal,
-        }
-      );
+      setError("");
 
-      const payload: unknown =
-        await response.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 100000);
+
+      let response: Response;
+      try {
+        response = await fetch(
+          `/api/analyze?coin=${coin}&t=${Date.now()}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const json: unknown = await response.json();
 
       if (!response.ok) {
         const message =
-          isRecord(payload) &&
-          typeof payload.error === "string"
-            ? payload.error
-            : `API HTTP ${response.status}`;
-
+          typeof json === "object" &&
+          json !== null &&
+          "error" in json
+            ? String(json.error)
+            : "API request failed";
         throw new Error(message);
       }
 
-      const result = parseAnalysis(payload);
-
       if (
-        result.coin !== coin ||
-        result.timeframe !== timeframe
+        typeof json !== "object" ||
+        json === null ||
+        !("timeframes" in json) ||
+        !("signal" in json)
       ) {
-        throw new Error(
-          "API returned a different market or timeframe"
-        );
+        throw new Error("Invalid API response");
       }
 
-      if (id === requestId.current) {
-        setData(result);
-      }
+      setData(json as Analysis);
+      setUpdated(new Date().toLocaleTimeString());
     } catch (err) {
-      if (
-        id !== requestId.current ||
-        abort.signal.aborted
-      ) {
-        return;
-      }
-
-      setData(null);
-
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load analysis"
+        err instanceof Error ? err.message : "Connection error"
       );
     } finally {
-      if (id === requestId.current) {
-        setLoading(false);
-      }
+      setLoading(false);
     }
-  }, [coin, timeframe]);
+  }, [coin]);
 
   useEffect(() => {
     setData(null);
+    setLoading(true);
     void load();
-
-    return () => {
-      controller.current?.abort();
-      requestId.current += 1;
-    };
   }, [load]);
 
   useEffect(() => {
     if (!autoRefresh) return;
+    const timer = setInterval(() => void load(), 30000);
+    return () => clearInterval(timer);
+  }, [load, autoRefresh]);
 
-    const timer = window.setInterval(() => {
-      if (
-        document.visibilityState === "visible" &&
-        !loading
-      ) {
-        void load();
-      }
-    }, REFRESH_MS);
-
-    return () => window.clearInterval(timer);
-  }, [autoRefresh, load, loading]);
-
-  const signal = data?.signal ?? "HOLD";
+  const frame = data?.timeframes?.[timeframe];
+  const signal = data?.signal?.toUpperCase() || "HOLD";
 
   const signalColor =
     signal === "LONG"
-      ? "#34d399"
+      ? "#22c55e"
       : signal === "SHORT"
-      ? "#fb7185"
-      : "#fbbf24";
+      ? "#ef4444"
+      : "#f59e0b";
+
+  const card: React.CSSProperties = {
+    background: "#151f32",
+    border: "1px solid #293750",
+    borderRadius: 16,
+    padding: 18,
+  };
+
+  const buttonStyle = (active: boolean): React.CSSProperties => ({
+    padding: "11px 16px",
+    borderRadius: 10,
+    border: "1px solid #334155",
+    background: active ? "#2563eb" : "#1e293b",
+    color: "#fff",
+    fontWeight: 700,
+    cursor: "pointer",
+  });
 
   return (
-    <main className="min-h-screen bg-[#080d19] px-4 py-6 text-slate-100 sm:px-6">
-      <div className="mx-auto max-w-5xl space-y-5">
-
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-400">
-              Crypto Signal Pro
-            </p>
-
-            <h1 className="mt-1 text-2xl font-bold sm:text-3xl">
-              Market Analysis Dashboard
-            </h1>
-
-            <p className="mt-1 text-sm text-slate-400">
-              Delta Exchange India · Completed-candle indicators
-            </p>
-          </div>
-
-          <span
-            className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-              error
-                ? "border-red-700 text-red-300"
-                : data
-                ? "border-emerald-700 text-emerald-300"
-                : "border-slate-600 text-slate-300"
-            }`}
-          >
-            {error
-              ? "● Disconnected"
-              : data
-              ? "● Connected"
-              : "● Connecting"}
-          </span>
+    <main
+      style={{
+        minHeight: "100vh",
+        background: "#080f1d",
+        color: "#f8fafc",
+        padding: "20px 14px",
+        fontFamily: "Arial, sans-serif",
+      }}
+    >
+      <div style={{ maxWidth: 1100, margin: "auto" }}>
+        <header style={{ marginBottom: 24 }}>
+          <h1 style={{ fontSize: 29, marginBottom: 6 }}>
+            Crypto Signal Pro
+          </h1>
+          <p style={{ color: "#94a3b8", margin: 0 }}>
+            Delta Exchange India • Technical Analysis
+          </p>
         </header>
 
-        <section className="rounded-2xl border border-slate-800 bg-[#111a2c] p-4 sm:p-6">
-          <div className="grid gap-5 sm:grid-cols-2">
-
-            <div>
-              <p className="mb-2 text-xs font-medium text-slate-400">
-                Market
-              </p>
-
-              <div className="flex gap-2">
-                {COINS.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    aria-pressed={coin === item}
-                    onClick={() => setCoin(item)}
-                    className={`flex-1 rounded-xl px-4 py-3 font-semibold transition ${
-                      coin === item
-                        ? "bg-cyan-500 text-slate-950"
-                        : "bg-slate-800 text-slate-200 hover:bg-slate-700"
-                    }`}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <p className="mb-2 text-xs font-medium text-slate-400">
-                Timeframe
-              </p>
-
-              <div className="grid grid-cols-4 gap-2">
-                {TIMEFRAMES.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    aria-pressed={timeframe === item}
-                    onClick={() => setTimeframe(item)}
-                    className={`rounded-xl px-2 py-3 text-sm font-semibold transition ${
-                      timeframe === item
-                        ? "bg-cyan-500 text-slate-950"
-                        : "bg-slate-800 text-slate-200 hover:bg-slate-700"
-                    }`}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
-            </div>
+        <section style={card}>
+          <h3>Select Cryptocurrency</h3>
+          <div style={{ display: "flex", gap: 10 }}>
+            {(["BTC", "ETH"] as Coin[]).map((item) => (
+              <button
+                key={item}
+                style={buttonStyle(coin === item)}
+                onClick={() => setCoin(item)}
+              >
+                {item}
+              </button>
+            ))}
           </div>
 
-          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(event) =>
-                  setAutoRefresh(event.target.checked)
-                }
-                className="h-4 w-4 accent-cyan-500"
-              />
-              Auto refresh (30 seconds)
-            </label>
-
-            <button
-              type="button"
-              disabled={loading}
-              onClick={() => void load()}
-              className="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {loading
-                ? "Refreshing…"
-                : "↻ Refresh now"}
-            </button>
+          <h3 style={{ marginTop: 24 }}>Timeframe</h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {FRAMES.map((item) => (
+              <button
+                key={item}
+                style={buttonStyle(timeframe === item)}
+                onClick={() => setTimeframe(item)}
+              >
+                {item}
+              </button>
+            ))}
           </div>
         </section>
 
+        <div style={{ height: 16 }} />
+
+        {loading && (
+          <div style={card}>Loading market analysis...</div>
+        )}
+
         {error && (
           <div
-            role="alert"
-            className="rounded-xl border border-red-800 bg-red-950/50 p-4 text-sm text-red-200"
+            style={{
+              ...card,
+              borderColor: "#ef4444",
+              color: "#fca5a5",
+            }}
           >
-            <strong>Analysis unavailable:</strong>{" "}
-            {error}
-
-            <p className="mt-1 text-red-300/80">
-              Check Render deployment, the analysis API
-              and Delta candle availability. No trading
-              signal is shown while disconnected.
-            </p>
+            API Error: {error}
           </div>
         )}
 
-        {loading && (
-          <p
-            role="status"
-            className="text-sm text-cyan-300"
-          >
-            Loading {coin}/{timeframe} analysis…
-          </p>
-        )}
-
-        {data && !error && (
+        {data && (
           <>
-            <section className="grid gap-4 sm:grid-cols-2">
+            <section style={{ ...card, marginTop: 16 }}>
+              <p style={{ color: "#94a3b8" }}>
+                {data.symbol} • {timeframe}
+              </p>
 
-              <div className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5">
-                <p className="text-sm text-slate-400">
-                  {data.symbol} · Last completed candle close
-                </p>
+              <h2 style={{ fontSize: 36, margin: "10px 0" }}>
+                ${format(frame?.price)}
+              </h2>
 
-                <p className="mt-3 break-all text-3xl font-bold tabular-nums sm:text-4xl">
-                  ${formatNumber(data.price)}
-                </p>
-
-                <p className="mt-3 text-xs text-slate-400">
-                  Not a live executable order price
-                </p>
+              <div
+                style={{
+                  display: "inline-block",
+                  padding: "10px 20px",
+                  borderRadius: 10,
+                  background: signalColor,
+                  color: "#08111f",
+                  fontWeight: 900,
+                  fontSize: 22,
+                }}
+              >
+                {signal}
               </div>
 
-              <div className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5">
-                <p className="text-sm text-slate-400">
-                  Rule-based signal
-                </p>
+              <p>Multi-Timeframe Confirmation: {data.confirmation}</p>
+              <p style={{ color: "#94a3b8" }}>
+                Last Updated: {updated}
+              </p>
+            </section>
 
-                <p
-                  className="mt-3 text-4xl font-extrabold"
-                  style={{ color: signalColor }}
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns:
+                  "repeat(auto-fit, minmax(145px, 1fr))",
+                gap: 12,
+                marginTop: 16,
+              }}
+            >
+              {[
+                ["RSI (14)", format(frame?.rsi)],
+                ["MACD", format(frame?.macd, 4)],
+                ["MACD Signal", format(frame?.macd_signal, 4)],
+                ["EMA 20", format(frame?.ema20)],
+                ["EMA 50", format(frame?.ema50)],
+                ["EMA 200", format(frame?.ema200)],
+                ["ATR (14)", format(frame?.atr14)],
+                ["ADX (14)", format(frame?.adx14)],
+              ].map(([label, value]) => (
+                <div key={label} style={card}>
+                  <p style={{ color: "#94a3b8", fontSize: 13 }}>
+                    {label}
+                  </p>
+                  <h3>{value}</h3>
+                </div>
+              ))}
+            </section>
+
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns:
+                  "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: 12,
+                marginTop: 16,
+              }}
+            >
+              <div style={card}>
+                <p>Support</p>
+                <h2 style={{ color: "#22c55e" }}>
+                  ${format(frame?.support)}
+                </h2>
+              </div>
+
+              <div style={card}>
+                <p>Resistance</p>
+                <h2 style={{ color: "#ef4444" }}>
+                  ${format(frame?.resistance)}
+                </h2>
+              </div>
+            </section>
+
+            <section style={{ ...card, marginTop: 16 }}>
+              <h3>Multi-Timeframe Analysis</h3>
+
+              <div style={{ overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    borderCollapse: "collapse",
+                    textAlign: "left",
+                  }}
                 >
-                  {signal}
-                </p>
-
-                <p className="mt-3 text-xs text-slate-400">
-                  Technical indication only · Not a
-                  guaranteed trade
-                </p>
+                  <thead>
+                    <tr>
+                      {["TF", "RSI", "Price", "Direction"].map((h) => (
+                        <th key={h} style={{ padding: 10 }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {FRAMES.map((tf) => {
+                      const item = data.timeframes?.[tf];
+                      return (
+                        <tr key={tf}>
+                          <td style={{ padding: 10 }}>{tf}</td>
+                          <td>{format(item?.rsi)}</td>
+                          <td>${format(item?.price)}</td>
+                          <td>{item?.direction || "--"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </section>
 
-            <section className="grid gap-4 sm:grid-cols-2">
-
-              <div className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5">
-                <h2 className="mb-4 text-lg font-semibold">
-                  Key price levels
-                </h2>
-
-                <Metric
-                  label="Support (20 candles)"
-                  value={`$${formatNumber(data.support)}`}
-                  color="text-emerald-300"
-                />
-
-                <Metric
-                  label="Resistance (20 candles)"
-                  value={`$${formatNumber(data.resistance)}`}
-                  color="text-rose-300"
-                />
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5">
-                <h2 className="mb-4 text-lg font-semibold">
-                  Momentum
-                </h2>
-
-                <Metric
-                  label="RSI (14)"
-                  value={formatNumber(data.rsi)}
-                />
-
-                <Metric
-                  label="MACD line"
-                  value={formatNumber(data.macd.line, 4)}
-                />
-
-                <Metric
-                  label="MACD signal"
-                  value={formatNumber(data.macd.signal, 4)}
-                />
-
-                <Metric
-                  label="MACD histogram"
-                  value={formatNumber(
-                    data.macd.histogram,
-                    4
-                  )}
-                />
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5">
-              <h2 className="mb-4 text-lg font-semibold">
-                Exponential Moving Averages
-              </h2>
-
-              <div className="grid gap-4 sm:grid-cols-3">
-
-                <div className="rounded-xl bg-slate-800/70 p-4">
-                  <p className="text-sm text-slate-400">
-                    EMA 20
-                  </p>
-
-                  <p className="mt-2 text-xl font-bold tabular-nums">
-                    ${formatNumber(data.ema20)}
-                  </p>
-                </div>
-
-                <div className="rounded-xl bg-slate-800/70 p-4">
-                  <p className="text-sm text-slate-400">
-                    EMA 50
-                  </p>
-
-                  <p className="mt-2 text-xl font-bold tabular-nums">
-                    ${formatNumber(data.ema50)}
-                  </p>
-                </div>
-
-                <div className="rounded-xl bg-slate-800/70 p-4">
-                  <p className="text-sm text-slate-400">
-                    EMA 200
-                  </p>
-
-                  <p className="mt-2 text-xl font-bold tabular-nums">
-                    ${formatNumber(data.ema200)}
-                  </p>
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-slate-800 bg-[#111a2c] p-5 text-sm text-slate-300">
-              <h2 className="mb-3 text-lg font-semibold text-slate-100">
-                Data details
-              </h2>
-
-              <Metric
-                label="Completed candles"
-                value={String(data.candleCount)}
-              />
-
-              <Metric
-                label="Last candle opened"
-                value={formatTime(
-                  data.lastCandleTime
-                )}
-              />
-
-              <Metric
-                label="API updated"
-                value={formatTime(data.updatedAt)}
-              />
-
-              <Metric
-                label="Analysis method"
-                value={
-                  data.analysisType ??
-                  "rule_based"
-                }
-              />
+            <section style={{ ...card, marginTop: 16 }}>
+              <h3>Trade Levels</h3>
+              <p>Entry: ${format(data.entry)}</p>
+              <p>Stop Loss: ${format(data.stop_loss)}</p>
+              <p>Target 1: ${format(data.target1)}</p>
+              <p>Target 2: ${format(data.target2)}</p>
+              <p>Target 3: ${format(data.target3)}</p>
+              <p style={{ color: "#94a3b8" }}>
+                {data.confidence || "No confidence data"}
+              </p>
             </section>
           </>
         )}
 
-        <footer className="pb-4 text-center text-xs leading-relaxed text-slate-500">
-          Market data may be delayed or unavailable.
-          Signals are rule-based, not financial advice.
-          Confirm exchange prices and manage risk
-          before trading.
+        <section style={{ ...card, marginTop: 16 }}>
+          <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+            />
+            Auto Refresh (30 seconds)
+          </label>
+
+          <button
+            style={{ ...buttonStyle(true), marginTop: 14 }}
+            onClick={() => void load()}
+          >
+            Refresh Analysis
+          </button>
+        </section>
+
+        <footer
+          style={{
+            textAlign: "center",
+            color: "#94a3b8",
+            marginTop: 28,
+            fontSize: 12,
+          }}
+        >
+          Educational technical analysis only. Not financial advice.
+          Signals are not guaranteed.
         </footer>
       </div>
     </main>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  color = "text-slate-100",
-}: {
-  label: string;
-  value: string;
-  color?: string;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 py-3 last:border-0">
-      <span className="text-sm text-slate-400">
-        {label}
-      </span>
-
-      <span
-        className={`break-all text-right font-semibold tabular-nums ${color}`}
-      >
-        {value}
-      </span>
-    </div>
   );
 }
