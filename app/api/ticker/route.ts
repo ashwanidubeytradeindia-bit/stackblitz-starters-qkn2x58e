@@ -7,22 +7,18 @@ export const runtime = "nodejs";
 const DELTA_API = "https://api.india.delta.exchange";
 
 type Coin = "BTC" | "ETH";
-
 type TickerData = Record<string, unknown>;
 
-function validNumber(value: unknown): number | null {
+function positiveNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") {
     return null;
   }
 
-  const number = Number(value);
-
-  return Number.isFinite(number) && number > 0
-    ? number
-    : null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function sourceTime(value: unknown): string | null {
+function parseSourceTime(value: unknown): string | null {
   if (value === null || value === undefined || value === "") {
     return null;
   }
@@ -32,25 +28,19 @@ function sourceTime(value: unknown): string | null {
     !/^\d+(\.\d+)?$/.test(value)
   ) {
     const date = new Date(value);
-
     return Number.isNaN(date.getTime())
       ? null
       : date.toISOString();
   }
 
-  const number = Number(value);
+  const n = Number(value);
 
-  if (!Number.isFinite(number) || number <= 0) {
+  if (!Number.isFinite(n) || n <= 0) {
     return null;
   }
 
-  let milliseconds = number;
-
-  if (number < 1e11) {
-    milliseconds = number * 1000;
-  } else if (number >= 1e14) {
-    milliseconds = number / 1000;
-  }
+  const milliseconds =
+    n < 1e11 ? n * 1000 : n >= 1e14 ? n / 1000 : n;
 
   const date = new Date(milliseconds);
 
@@ -59,15 +49,14 @@ function sourceTime(value: unknown): string | null {
     : date.toISOString();
 }
 
-function jsonResponse(
+function respond(
   body: Record<string, unknown>,
-  status: number
+  status = 200
 ) {
   return NextResponse.json(body, {
     status,
     headers: {
-      "Cache-Control":
-        "no-store, no-cache, must-revalidate",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
     },
   });
 }
@@ -78,53 +67,30 @@ export async function GET(request: NextRequest) {
     ?.toUpperCase();
 
   if (requested !== "BTC" && requested !== "ETH") {
-    return jsonResponse(
-      {
-        error: "coin must be BTC or ETH",
-      },
+    return respond(
+      { error: "coin must be BTC or ETH" },
       400
     );
   }
 
   const coin: Coin = requested;
-
-  const symbol =
-    coin === "BTC" ? "BTCUSD" : "ETHUSD";
+  const symbol = `${coin}USD`;
 
   try {
-    const controller = new AbortController();
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, 8000);
-
-    let response: Response;
-
-    try {
-      response = await fetch(
-        `${DELTA_API}/v2/tickers/${symbol}`,
-        {
-          method: "GET",
-          cache: "no-store",
-          signal: controller.signal,
-          headers: {
-            Accept: "application/json",
-          },
-        }
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
+    const response = await fetch(
+      `${DELTA_API}/v2/tickers/${symbol}`,
+      {
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
 
     if (!response.ok) {
-      return jsonResponse(
-        {
-          error: `Delta ticker HTTP ${response.status}`,
-          coin,
-          symbol,
-          source: "Delta Exchange India",
-        },
-        502
+      throw new Error(
+        `Delta ticker HTTP ${response.status}`
       );
     }
 
@@ -136,95 +102,109 @@ export async function GET(request: NextRequest) {
       typeof payload.result !== "object" ||
       Array.isArray(payload.result)
     ) {
-      return jsonResponse(
-        {
-          error: "Invalid Delta ticker response",
-          coin,
-          symbol,
-        },
-        502
-      );
+      throw new Error("Invalid Delta ticker response");
     }
 
     const ticker = payload.result as TickerData;
 
-    const lastPrice = validNumber(ticker.last_price);
-    const closePrice = validNumber(ticker.close);
-    const markPrice = validNumber(ticker.mark_price);
-    const spotPrice = validNumber(ticker.spot_price);
+    const lastPrice = positiveNumber(ticker.last_price);
+    const closePrice = positiveNumber(ticker.close);
+    const markPrice = positiveNumber(ticker.mark_price);
+    const spotPrice = positiveNumber(ticker.spot_price);
 
-    // Only actual traded-price fields are eligible
-    // for the primary ticker price.
-    let price: number | null = null;
-    let priceType: string | null = null;
+    // Never substitute mark or spot for a traded price.
+    const price = lastPrice ?? closePrice;
 
-    if (lastPrice !== null) {
-      price = lastPrice;
-      priceType = "last_price";
-    } else if (closePrice !== null) {
-      price = closePrice;
-      priceType = "close";
-    }
+    const priceType =
+      lastPrice !== null
+        ? "last_price"
+        : closePrice !== null
+        ? "close"
+        : null;
 
     if (price === null) {
-      return jsonResponse(
-        {
-          error:
-            "No valid traded-price field in Delta ticker",
-          coin,
-          symbol,
-          availableFields: Object.keys(ticker),
-          markPrice,
-          spotPrice,
-          source: "Delta Exchange India",
-        },
-        502
+      throw new Error(
+        "Neither last_price nor close is available"
       );
     }
 
-    const timestamp = sourceTime(
+    // This is the ticker timestamp, not necessarily
+    // the timestamp of the last executed trade.
+    const sourceTimestamp = parseSourceTime(
       ticker.timestamp ??
-        ticker.updated_at ??
-        ticker.last_trade_time ??
-        null
+      ticker.updated_at ??
+      ticker.last_trade_time ??
+      null
     );
 
     const serverReceivedAt = new Date().toISOString();
 
-    return jsonResponse(
-      {
-        coin,
-        symbol: String(ticker.symbol || symbol),
+    const sourceMs = sourceTimestamp
+      ? Date.parse(sourceTimestamp)
+      : null;
 
-        // Existing dashboard-compatible fields
-        price,
-        priceType,
-        source: "Delta Exchange India",
-        sourceTimestamp: timestamp,
-        serverReceivedAt,
+    const ageMs =
+      sourceMs !== null && Number.isFinite(sourceMs)
+        ? Date.now() - sourceMs
+        : null;
 
-        // Additional diagnostic fields
-        lastPrice,
-        closePrice,
-        markPrice,
-        spotPrice,
+    // Approximate ticker-data freshness.
+    // This does NOT prove a new trade occurred.
+    const tickerFresh =
+      ageMs !== null &&
+      ageMs >= -10000 &&
+      ageMs <= 30000;
 
-        // Receiving a ticker does not prove
-        // a new trade happened this second.
-        isLiveTradeVerified: false,
-        timestampAvailable: timestamp !== null,
-      },
-      200
-    );
+    return respond({
+      coin,
+      symbol: String(ticker.symbol || symbol),
+
+      // Backward-compatible dashboard fields.
+      price,
+      priceType,
+      source: "Delta Exchange India",
+      sourceTimestamp,
+      serverReceivedAt,
+
+      // Explicit market-price fields.
+      lastPrice,
+      closePrice,
+      markPrice,
+      spotPrice,
+
+      // Additional verification diagnostics.
+      tickerFresh,
+      sourceAgeMs: ageMs,
+      timestampAvailable: sourceTimestamp !== null,
+      isLiveTradeVerified: false,
+
+      // Important distinction:
+      // close is not guaranteed to be the latest trade.
+      priceDescription:
+        priceType === "last_price"
+          ? "Exchange-reported last_price"
+          : "Exchange-reported close price",
+
+      freshnessDescription:
+        sourceTimestamp === null
+          ? "Exchange source timestamp unavailable"
+          : tickerFresh
+          ? "Ticker timestamp is within 30 seconds"
+          : "Ticker timestamp is outside freshness window",
+
+      tradeVerificationDescription:
+        "A fresh ticker response does not independently verify a new trade.",
+    });
   } catch (error) {
     const message =
       error instanceof Error
-        ? error.name === "AbortError"
+        ? error.name === "TimeoutError" ||
+          error.name === "AbortError"
           ? "Delta ticker request timed out"
           : error.message
         : "Unknown ticker error";
 
-    return jsonResponse(
+    return respond(
       {
         error: message,
         coin,
