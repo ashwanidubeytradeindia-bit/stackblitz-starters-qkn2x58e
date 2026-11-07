@@ -82,7 +82,10 @@ function parseAnalysis(value: unknown): Analysis {
   ];
 
   if (
-    !required.every((key) => isNumber(value[key])) ||
+    !required.every
+(key) =>
+  isNumber((value.macd as Record<string, unknown>)[key])
+ ||
     !["line", "signal", "histogram"].every(
       (key) => isNumber(value.macd[key])
     ) ||
