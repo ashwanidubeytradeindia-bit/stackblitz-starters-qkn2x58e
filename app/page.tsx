@@ -1,13 +1,7 @@
 
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Coin = "BTC" | "ETH";
 type Timeframe = "5m" | "15m" | "1h" | "4h";
@@ -19,434 +13,364 @@ type Candle = {
   high: number;
   low: number;
   close: number;
-  volume: number;
-};
-
-type MACD = {
-  line?: number;
-  signal?: number;
-  histogram?: number;
+  volume?: number;
 };
 
 type Analysis = {
-  coin?: string;
+  coin: Coin;
   symbol?: string;
   timeframe?: string;
-  price?: number;
-  signal?: Signal;
-  support?: number;
-  resistance?: number;
+  price: number;
+  signal: Signal;
+  support: number;
+  resistance: number;
   rsi?: number;
-  macd?: MACD;
+  macd?: {
+    line?: number;
+    signal?: number;
+    histogram?: number;
+  };
   ema20?: number;
   ema50?: number;
-  ema200?: number;
-  candleCount?: number;
-  candles?: Candle[];
-  updatedAt?: string;
-  lastCandleTime?: string;
-  status?: string;
-  error?: string;
+  candles: Candle[];
 };
 
-const API_PATH = "/api/analysis";
 const REFRESH_MS = 30000;
 
-const COLORS = {
-  background: "#081120",
-  card: "#142238",
-  border: "#2c405d",
-  text: "#e8eef9",
-  muted: "#9aacc6",
-  green: "#25d889",
-  red: "#ff6575",
-  yellow: "#ffd33d",
-  blue: "#2876ed",
-  grid: "#2b3c55",
+const number = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
 };
 
-function money(value?: number | null) {
-  if (value == null || !Number.isFinite(value)) {
-    return "--";
-  }
-
-  return "$" + value.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+const fmt = (value: unknown, digits = 2) => {
+  const n = number(value);
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   });
-}
+};
 
-function number(value?: number | null, digits = 2) {
-  if (value == null || !Number.isFinite(value)) {
-    return "--";
+function validateData(raw: any, coin: Coin): Analysis {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Invalid API response");
   }
 
-  return value.toFixed(digits);
-}
-
-function timeText(value?: string) {
-  if (!value) return "--";
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) return "--";
-
-  return date.toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function signalColor(signal?: string) {
-  if (signal === "LONG") return COLORS.green;
-  if (signal === "SHORT") return COLORS.red;
-  return COLORS.yellow;
-}
-
-function normalizeCandles(value: unknown): Candle[] {
-  if (!Array.isArray(value)) return [];
-
-  const candles: Candle[] = [];
-
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-
-    const c = item as Record<string, unknown>;
-
-    const candle: Candle = {
-      time: Number(c.time),
-      open: Number(c.open),
-      high: Number(c.high),
-      low: Number(c.low),
-      close: Number(c.close),
-      volume: Number(c.volume),
-    };
-
-    if (
-      Object.values(candle).every(Number.isFinite) &&
-      candle.open > 0 &&
-      candle.high > 0 &&
-      candle.low > 0 &&
-      candle.close > 0 &&
-      candle.high >= Math.max(candle.open, candle.close) &&
-      candle.low <= Math.min(candle.open, candle.close)
-    ) {
-      candles.push(candle);
-    }
+  if (raw.error) {
+    throw new Error(String(raw.error));
   }
 
-  return candles
-    .sort((a, b) => a.time - b.time)
+  const price = number(raw.price);
+  const support = number(raw.support);
+  const resistance = number(raw.resistance);
+
+  if (![price, support, resistance].every(Number.isFinite)) {
+    throw new Error("API price/support/resistance missing");
+  }
+
+  if (!Array.isArray(raw.candles)) {
+    throw new Error("API candles array missing");
+  }
+
+  const candles: Candle[] = raw.candles
+    .map((c: any) => ({
+      time: number(c.time),
+      open: number(c.open),
+      high: number(c.high),
+      low: number(c.low),
+      close: number(c.close),
+      volume: number(c.volume),
+    }))
     .filter(
-      (c, i, arr) =>
-        i === 0 || c.time !== arr[i - 1].time
+      (c: Candle) =>
+        [c.time, c.open, c.high, c.low, c.close].every(
+          Number.isFinite
+        ) &&
+        c.time > 0 &&
+        c.low <= c.high &&
+        c.open >= c.low &&
+        c.open <= c.high &&
+        c.close >= c.low &&
+        c.close <= c.high
     )
-    .slice(-120);
+    .sort((a: Candle, b: Candle) => a.time - b.time);
+
+  if (candles.length < 2) {
+    throw new Error("Not enough valid candle data");
+  }
+
+  const signal: Signal =
+    raw.signal === "LONG" ||
+    raw.signal === "SHORT" ||
+    raw.signal === "HOLD"
+      ? raw.signal
+      : "HOLD";
+
+  return {
+    coin,
+    symbol: String(raw.symbol || `${coin}USD`),
+    timeframe: raw.timeframe,
+    price,
+    signal,
+    support,
+    resistance,
+    rsi: number(raw.rsi),
+    macd: {
+      line: number(raw.macd?.line),
+      signal: number(raw.macd?.signal),
+      histogram: number(raw.macd?.histogram),
+    },
+    ema20: number(raw.ema20),
+    ema50: number(raw.ema50),
+    candles,
+  };
 }
 
 function CandlestickChart({
-  candles,
-  support,
-  resistance,
-  price,
+  data,
 }: {
-  candles: Candle[];
-  support?: number;
-  resistance?: number;
-  price?: number;
+  data: Analysis;
 }) {
-  const width = 900;
-  const height = 430;
+  const candles = useMemo(
+    () => data.candles.slice(-60),
+    [data.candles]
+  );
 
-  const left = 12;
-  const right = 105;
-  const top = 25;
-  const bottom = 48;
+  const width = 900;
+  const height = 400;
+  const left = 16;
+  const right = 94;
+  const top = 24;
+  const bottom = 40;
 
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
 
-  const chart = useMemo(() => {
-    if (!candles.length) return null;
+  const { minPrice, maxPrice } = useMemo(() => {
+    const values = candles.flatMap((c) => [
+      c.low,
+      c.high,
+    ]);
 
-    const visible = candles.slice(-100);
+    values.push(data.support, data.resistance);
 
-    const lows = visible.map((c) => c.low);
-    const highs = visible.map((c) => c.high);
-
-    const levels = [
-      ...lows,
-      ...highs,
-      ...(Number.isFinite(support) ? [support!] : []),
-      ...(Number.isFinite(resistance)
-        ? [resistance!]
-        : []),
-      ...(Number.isFinite(price) ? [price!] : []),
-    ];
-
-    const minimum = Math.min(...levels);
-    const maximum = Math.max(...levels);
-
-    const padding = Math.max(
-      (maximum - minimum) * 0.08,
-      maximum * 0.0005
-    );
-
-    const min = minimum - padding;
-    const max = maximum + padding;
-    const range = max - min;
-
-    const y = (value: number) =>
-      top + ((max - value) / range) * plotHeight;
-
-    const step = plotWidth / visible.length;
-    const candleWidth = Math.max(
-      2,
-      Math.min(10, step * 0.65)
-    );
+    const lo = Math.min(...values);
+    const hi = Math.max(...values);
+    const padding = Math.max((hi - lo) * 0.08, hi * 0.0001);
 
     return {
-      visible,
-      min,
-      max,
-      y,
-      step,
-      candleWidth,
+      minPrice: lo - padding,
+      maxPrice: hi + padding,
     };
-  }, [candles, support, resistance, price]);
+  }, [candles, data.support, data.resistance]);
 
-  if (!chart) {
-    return (
-      <div className="empty">
-        Waiting for completed candlestick data...
-      </div>
-    );
-  }
+  const y = (price: number) =>
+    top +
+    ((maxPrice - price) / (maxPrice - minPrice)) *
+      plotHeight;
 
-  const {
-    visible,
-    min,
-    max,
-    y,
-    step,
-    candleWidth,
-  } = chart;
+  const slot = plotWidth / candles.length;
+  const bodyWidth = Math.max(2, slot * 0.6);
 
-  const x = (index: number) =>
-    left + index * step + step / 2;
-
-  const horizontalLevels = Array.from(
-    { length: 6 },
-    (_, i) => max - ((max - min) * i) / 5
+  const gridPrices = Array.from(
+    { length: 5 },
+    (_, i) =>
+      minPrice + ((maxPrice - minPrice) * i) / 4
   );
 
-  const labels = [
-    0,
-    Math.floor((visible.length - 1) / 3),
-    Math.floor(((visible.length - 1) * 2) / 3),
-    visible.length - 1,
-  ];
-
-  const levelLine = (
-    value: number | undefined,
-    color: string,
-    label: string,
-    dash: string
-  ) => {
-    if (
-      value == null ||
-      !Number.isFinite(value)
-    ) {
-      return null;
-    }
-
-    const position = y(value);
-
-    return (
-      <g>
-        <line
-          x1={left}
-          x2={left + plotWidth}
-          y1={position}
-          y2={position}
-          stroke={color}
-          strokeWidth="2"
-          strokeDasharray={dash}
-        />
-        <rect
-          x={left + plotWidth + 3}
-          y={position - 13}
-          width="99"
-          height="26"
-          rx="4"
-          fill={color}
-        />
-        <text
-          x={left + plotWidth + 8}
-          y={position + 5}
-          fill="#ffffff"
-          fontSize="12"
-          fontWeight="bold"
-        >
-          {label} {number(value, value >= 10000 ? 0 : 1)}
-        </text>
-      </g>
-    );
-  };
+  const supportY = y(data.support);
+  const resistanceY = y(data.resistance);
 
   return (
-    <div className="chartScroll">
+    <div style={{ overflowX: "auto", width: "100%" }}>
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="chart"
+        style={{
+          width: "100%",
+          minWidth: 340,
+          display: "block",
+        }}
         role="img"
-        aria-label="Candlestick chart with support and resistance levels"
+        aria-label="Candlestick chart with support and resistance lines"
       >
         <rect
+          x="0"
+          y="0"
           width={width}
           height={height}
-          fill={COLORS.card}
+          fill="#101b2d"
         />
 
-        {horizontalLevels.map((level, i) => (
-          <g key={`grid-${i}`}>
+        {gridPrices.map((price, i) => (
+          <g key={i}>
             <line
               x1={left}
-              x2={left + plotWidth}
-              y1={y(level)}
-              y2={y(level)}
-              stroke={COLORS.grid}
-              strokeWidth="1"
+              x2={width - right}
+              y1={y(price)}
+              y2={y(price)}
+              stroke="#29384e"
+              strokeDasharray="4 5"
             />
             <text
-              x={left + plotWidth + 10}
-              y={y(level) + 4}
-              fill={COLORS.muted}
-              fontSize="13"
+              x={width - right + 9}
+              y={y(price) + 4}
+              fill="#91a4c0"
+              fontSize="12"
             >
-              {number(level, level >= 10000 ? 0 : 2)}
+              {fmt(price)}
             </text>
           </g>
         ))}
 
-        {visible.map((c, i) => {
-          const rising = c.close >= c.open;
-          const color = rising
-            ? COLORS.green
-            : COLORS.red;
+        {candles.map((c, i) => {
+          const x = left + slot * (i + 0.5);
+          const up = c.close >= c.open;
+          const color = up ? "#22c55e" : "#ef4444";
 
-          const center = x(i);
-
-          const bodyTop = y(
-            Math.max(c.open, c.close)
-          );
-
-          const bodyBottom = y(
-            Math.min(c.open, c.close)
+          const bodyTop = Math.min(
+            y(c.open),
+            y(c.close)
           );
 
           const bodyHeight = Math.max(
             1.5,
-            bodyBottom - bodyTop
+            Math.abs(y(c.open) - y(c.close))
           );
 
           return (
-            <g key={c.time}>
+            <g key={`${c.time}-${i}`}>
               <line
-                x1={center}
-                x2={center}
+                x1={x}
+                x2={x}
                 y1={y(c.high)}
                 y2={y(c.low)}
                 stroke={color}
-                strokeWidth="1.3"
+                strokeWidth="1.4"
               />
               <rect
-                x={center - candleWidth / 2}
+                x={x - bodyWidth / 2}
                 y={bodyTop}
-                width={candleWidth}
+                width={bodyWidth}
                 height={bodyHeight}
                 fill={color}
+                rx="1"
               />
             </g>
           );
         })}
 
-        {levelLine(
-          support,
-          COLORS.green,
-          "S",
-          "7 4"
-        )}
+        <line
+          x1={left}
+          x2={width - right}
+          y1={supportY}
+          y2={supportY}
+          stroke="#22c55e"
+          strokeWidth="2"
+          strokeDasharray="8 5"
+        />
 
-        {levelLine(
-          resistance,
-          COLORS.red,
-          "R",
-          "7 4"
-        )}
+        <rect
+          x={width - right}
+          y={supportY - 12}
+          width={right}
+          height="24"
+          fill="#166534"
+          rx="4"
+        />
 
-        {levelLine(
-          price,
-          COLORS.blue,
-          "P",
-          "3 5"
-        )}
+        <text
+          x={width - right + 5}
+          y={supportY + 4}
+          fontSize="11"
+          fill="white"
+        >
+          S {fmt(data.support)}
+        </text>
 
-        {labels.map((index, i) => {
-          const candle = visible[index];
+        <line
+          x1={left}
+          x2={width - right}
+          y1={resistanceY}
+          y2={resistanceY}
+          stroke="#fb7185"
+          strokeWidth="2"
+          strokeDasharray="8 5"
+        />
 
-          if (!candle) return null;
+        <rect
+          x={width - right}
+          y={resistanceY - 12}
+          width={right}
+          height="24"
+          fill="#9f1239"
+          rx="4"
+        />
 
-          const label = new Date(
-            candle.time * 1000
-          ).toLocaleString("en-IN", {
-            timeZone: "Asia/Kolkata",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
+        <text
+          x={width - right + 5}
+          y={resistanceY + 4}
+          fontSize="11"
+          fill="white"
+        >
+          R {fmt(data.resistance)}
+        </text>
 
-          return (
-            <text
-              key={`time-${i}`}
-              x={x(index)}
-              y={height - 13}
-              fill={COLORS.muted}
-              fontSize="13"
-              textAnchor={
-                i === 0
-                  ? "start"
-                  : i === labels.length - 1
-                  ? "end"
-                  : "middle"
-              }
-            >
-              {label}
-            </text>
-          );
-        })}
+        {candles
+          .filter((_, i) => i % 10 === 0)
+          .map((c) => {
+            const index = candles.indexOf(c);
+            const date = new Date(
+              c.time < 1e12
+                ? c.time * 1000
+                : c.time
+            );
+
+            return (
+              <text
+                key={c.time}
+                x={left + slot * (index + 0.5)}
+                y={height - 13}
+                textAnchor="middle"
+                fill="#91a4c0"
+                fontSize="11"
+              >
+                {date.toLocaleTimeString("en-IN", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  timeZone: "Asia/Kolkata",
+                })}
+              </text>
+            );
+          })}
       </svg>
+
+      <div className="legend">
+        <span style={{ color: "#22c55e" }}>
+          ━ Support
+        </span>
+        <span style={{ color: "#fb7185" }}>
+          ━ Resistance
+        </span>
+      </div>
     </div>
   );
 }
 
 function Metric({
-  title,
+  label,
   value,
   color,
 }: {
-  title: string;
+  label: string;
   value: string;
   color?: string;
 }) {
   return (
     <div className="metric">
-      <div className="metricTitle">{title}</div>
+      <div className="muted">{label}</div>
       <div
         className="metricValue"
-        style={{ color: color || COLORS.text }}
+        style={{ color: color || "#e2e8f0" }}
       >
         {value}
       </div>
@@ -459,37 +383,19 @@ export default function Home() {
   const [timeframe, setTimeframe] =
     useState<Timeframe>("15m");
 
-  const [data, setData] =
-    useState<Analysis | null>(null);
+  const [data, setData] = useState<Analysis | null>(
+    null
+  );
 
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] =
-    useState(false);
-
   const [error, setError] = useState("");
-  const [autoRefresh, setAutoRefresh] =
-    useState(true);
+  const [lastUpdated, setLastUpdated] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
-  const requestId = useRef(0);
-
-  const loadAnalysis = useCallback(
-    async (initial = false) => {
-      const currentRequest = ++requestId.current;
-
-      if (initial) {
-        setLoading(true);
-        setData(null);
-      } else {
-        setRefreshing(true);
-      }
-
+  const fetchAnalysis = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
       setError("");
-
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        20000
-      );
 
       try {
         const params = new URLSearchParams({
@@ -498,71 +404,53 @@ export default function Home() {
         });
 
         const response = await fetch(
-          `${API_PATH}?${params.toString()}`,
+          `/api/analysis?${params.toString()}`,
           {
             cache: "no-store",
-            signal: controller.signal,
-            headers: {
-              Accept: "application/json",
-            },
+            signal,
           }
         );
 
-        const contentType =
-          response.headers.get("content-type") || "";
+        const text = await response.text();
 
-        if (!contentType.includes("application/json")) {
+        let json: any;
+
+        try {
+          json = JSON.parse(text);
+        } catch {
           throw new Error(
-            `API returned non-JSON response (HTTP ${response.status}). Check API route.`
+            `API returned non-JSON response (HTTP ${response.status}). Check /api/analysis deployment.`
           );
         }
-
-        const result = (await response.json()) as Analysis;
 
         if (!response.ok) {
           throw new Error(
-            result.error ||
-              `API error HTTP ${response.status}`
+            json.error ||
+              `API request failed: HTTP ${response.status}`
           );
         }
 
-        if (
-          result.status === "disconnected" ||
-          !Number.isFinite(result.price) ||
-          !Array.isArray(result.candles)
-        ) {
-          throw new Error(
-            result.error ||
-              "Incomplete market analysis received."
+        const parsed = validateData(json, coin);
+
+        if (!signal?.aborted) {
+          setData(parsed);
+          setLastUpdated(
+            new Date().toLocaleTimeString("en-IN", {
+              timeZone: "Asia/Kolkata",
+            })
           );
         }
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
 
-        if (currentRequest !== requestId.current) {
-          return;
+        if (!signal?.aborted) {
+          setError(
+            err?.message || "Unable to load market data"
+          );
         }
-
-        setData({
-          ...result,
-          candles: normalizeCandles(result.candles),
-        });
-      } catch (err) {
-        if (currentRequest !== requestId.current) {
-          return;
-        }
-
-        setError(
-          err instanceof Error
-            ? err.name === "AbortError"
-              ? "Request timed out. Please refresh."
-              : err.message
-            : "Unable to fetch analysis."
-        );
       } finally {
-        clearTimeout(timeout);
-
-        if (currentRequest === requestId.current) {
+        if (!signal?.aborted) {
           setLoading(false);
-          setRefreshing(false);
         }
       }
     },
@@ -570,384 +458,342 @@ export default function Home() {
   );
 
   useEffect(() => {
-    loadAnalysis(true);
+    const controller = new AbortController();
 
-    return () => {
-      requestId.current++;
-    };
-  }, [loadAnalysis]);
+    setData(null);
+    fetchAnalysis(controller.signal);
+
+    return () => controller.abort();
+  }, [fetchAnalysis]);
 
   useEffect(() => {
     if (!autoRefresh) return;
 
-    const timer = setInterval(() => {
+    const interval = setInterval(() => {
       if (document.visibilityState === "visible") {
-        loadAnalysis(false);
+        fetchAnalysis();
       }
     }, REFRESH_MS);
 
-    return () => clearInterval(timer);
-  }, [autoRefresh, loadAnalysis]);
+    return () => clearInterval(interval);
+  }, [fetchAnalysis, autoRefresh]);
 
-  const candles = data?.candles || [];
-  const signal = data?.signal || "HOLD";
+  const signalColor =
+    data?.signal === "LONG"
+      ? "#22c55e"
+      : data?.signal === "SHORT"
+      ? "#fb7185"
+      : "#facc15";
 
-  const support = data?.support;
-  const resistance = data?.resistance;
-  const price = data?.price;
+  const trend =
+    data &&
+    Number.isFinite(data.ema20) &&
+    Number.isFinite(data.ema50)
+      ? (data.ema20 as number) >
+        (data.ema50 as number)
+        ? "Bullish"
+        : (data.ema20 as number) <
+          (data.ema50 as number)
+        ? "Bearish"
+        : "Neutral"
+      : "Unknown";
 
   const distanceSupport =
-    price != null &&
-    support != null &&
-    Number.isFinite(price) &&
-    Number.isFinite(support) &&
-    price > 0
-      ? ((price - support) / price) * 100
-      : null;
+    data && data.price !== 0
+      ? ((data.price - data.support) / data.price) *
+        100
+      : NaN;
 
   const distanceResistance =
-    price != null &&
-    resistance != null &&
-    Number.isFinite(price) &&
-    Number.isFinite(resistance) &&
-    price > 0
-      ? ((resistance - price) / price) * 100
-      : null;
+    data && data.price !== 0
+      ? ((data.resistance - data.price) /
+          data.price) *
+        100
+      : NaN;
 
   return (
     <main className="page">
-      <div className="container">
-        <header className="header">
+      <header className="header">
+        <div>
           <h1>₿ Crypto Signal Pro</h1>
           <p>
-            Delta Exchange India · Technical Analysis
+            Delta Exchange India · Milestone 8
           </p>
-          <p className="small">
-            Analysis updated:{" "}
-            {timeText(data?.updatedAt)}
-          </p>
-        </header>
+        </div>
+        <div className="live">
+          ● API Technical Analysis
+        </div>
+      </header>
 
-        <section className="card">
-          <div className="controlRow">
-            <div className="coinButtons">
-              {(["BTC", "ETH"] as Coin[]).map(
-                (item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={
-                      coin === item
-                        ? "activeButton"
-                        : "normalButton"
-                    }
-                    onClick={() => setCoin(item)}
-                  >
-                    {item}
-                  </button>
-                )
-              )}
-            </div>
-
-            <div className="timeframeControl">
-              <label htmlFor="timeframe">
-                Timeframe
-              </label>
-              <select
-                id="timeframe"
-                value={timeframe}
-                onChange={(e) =>
-                  setTimeframe(
-                    e.target.value as Timeframe
-                  )
+      <section className="panel">
+        <div className="controls">
+          <div className="coinButtons">
+            {(["BTC", "ETH"] as Coin[]).map((c) => (
+              <button
+                key={c}
+                className={
+                  coin === c ? "active" : "button"
                 }
+                onClick={() => setCoin(c)}
               >
-                <option value="5m">5m</option>
-                <option value="15m">15m</option>
-                <option value="1h">1h</option>
-                <option value="4h">4h</option>
-              </select>
-            </div>
+                {c}
+              </button>
+            ))}
           </div>
 
-          <div className="priceRow">
-            <div>
-              <div className="muted">
-                {coin}USD · Completed candle price
-              </div>
-              <div className="bigPrice">
-                {money(price)}
-              </div>
-              <div className="small">
-                Last candle:{" "}
-                {timeText(data?.lastCandleTime)}
-              </div>
-            </div>
-
-            <div
-              className="signalBadge"
-              style={{
-                color: signalColor(signal),
-              }}
-            >
-              {loading ? "..." : signal}
-            </div>
-          </div>
-
-          <div className="refreshRow">
-            <label className="checkLabel">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) =>
-                  setAutoRefresh(e.target.checked)
-                }
-              />
-              Auto Refresh (30 sec)
-            </label>
-
-            <button
-              type="button"
-              className="refreshButton"
-              disabled={loading || refreshing}
-              onClick={() => loadAnalysis(false)}
-            >
-              {loading || refreshing
-                ? "Refreshing..."
-                : "Refresh Analysis"}
-            </button>
-          </div>
-        </section>
-
-        {error && (
-          <div className="errorBox">
-            <strong>API Error</strong>
-            <div>{error}</div>
-            <div className="small">
-              Last successful data may still be
-              displayed. Do not treat stale signals
-              as current.
-            </div>
-          </div>
-        )}
-
-        <section className="card">
-          <div className="sectionHeader">
-            <h2>Candlestick Chart</h2>
-            <span className="small">
-              Completed candles only
-            </span>
-          </div>
-
-          {loading ? (
-            <div className="empty">
-              Loading BTC/ETH market data...
-            </div>
-          ) : (
-            <CandlestickChart
-              candles={candles}
-              support={support}
-              resistance={resistance}
-              price={price}
-            />
-          )}
-
-          <div className="legend">
-            <span>
-              <i
-                style={{
-                  background: COLORS.green,
-                }}
-              />
-              Support
-            </span>
-
-            <span>
-              <i
-                style={{
-                  background: COLORS.red,
-                }}
-              />
-              Resistance
-            </span>
-
-            <span>
-              <i
-                style={{
-                  background: COLORS.blue,
-                }}
-              />
-              Candle Close
-            </span>
-          </div>
-        </section>
-
-        <div className="metricGrid">
-          <Metric
-            title="Support"
-            value={money(support)}
-            color={COLORS.green}
-          />
-          <Metric
-            title="Resistance"
-            value={money(resistance)}
-            color={COLORS.red}
-          />
-          <Metric
-            title="RSI (14)"
-            value={number(data?.rsi)}
-          />
-          <Metric
-            title="EMA 20"
-            value={money(data?.ema20)}
-          />
-          <Metric
-            title="EMA 50"
-            value={money(data?.ema50)}
-          />
-          <Metric
-            title="EMA 200"
-            value={money(data?.ema200)}
-          />
+          <select
+            value={timeframe}
+            onChange={(e) =>
+              setTimeframe(
+                e.target.value as Timeframe
+              )
+            }
+          >
+            <option value="5m">5 Minutes</option>
+            <option value="15m">15 Minutes</option>
+            <option value="1h">1 Hour</option>
+            <option value="4h">4 Hours</option>
+          </select>
         </div>
 
-        <section className="card">
-          <h2>MACD Indicator</h2>
-
-          <div className="metricGrid innerGrid">
-            <Metric
-              title="MACD Line"
-              value={number(data?.macd?.line, 4)}
-            />
-            <Metric
-              title="Signal Line"
-              value={number(data?.macd?.signal, 4)}
-            />
-            <Metric
-              title="Histogram"
-              value={number(
-                data?.macd?.histogram,
-                4
-              )}
-              color={
-                (data?.macd?.histogram || 0) >= 0
-                  ? COLORS.green
-                  : COLORS.red
-              }
-            />
+        <div className="priceRow">
+          <div>
+            <div className="muted">
+              {data?.symbol || `${coin}USD`} ·{" "}
+              {timeframe}
+            </div>
+            <h2>
+              {data
+                ? `$${fmt(data.price)}`
+                : loading
+                ? "Loading..."
+                : "—"}
+            </h2>
           </div>
-        </section>
-
-        <section className="card">
-          <h2>Support & Resistance Analysis</h2>
-
-          <div className="analysisRow">
-            <span>Support Level</span>
-            <strong style={{ color: COLORS.green }}>
-              {money(support)}
-            </strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>Resistance Level</span>
-            <strong style={{ color: COLORS.red }}>
-              {money(resistance)}
-            </strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>Distance from Support</span>
-            <strong>
-              {distanceSupport == null
-                ? "--"
-                : `${number(distanceSupport)}%`}
-            </strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>Distance to Resistance</span>
-            <strong>
-              {distanceResistance == null
-                ? "--"
-                : `${number(distanceResistance)}%`}
-            </strong>
-          </div>
-        </section>
-
-        <section className="card">
-          <h2>Technical Signal</h2>
 
           <div
-            className="signalLarge"
+            className="signal"
             style={{
-              color: signalColor(signal),
+              color: signalColor,
+              borderColor: signalColor,
             }}
           >
-            {signal}
+            {data?.signal || "—"}
           </div>
+        </div>
 
-          <p className="muted">
-            {signal === "LONG"
-              ? "Bullish technical conditions detected."
-              : signal === "SHORT"
-              ? "Bearish technical conditions detected."
-              : "No confirmed directional signal."}
+        <div className="status">
+          {loading
+            ? "Refreshing market analysis..."
+            : error
+            ? "API connection issue"
+            : "Analysis updated"}
+
+          {lastUpdated && (
+            <span> · {lastUpdated} IST</span>
+          )}
+        </div>
+
+        <div className="actions">
+          <button
+            onClick={() => fetchAnalysis()}
+            disabled={loading}
+          >
+            {loading ? "Loading..." : "↻ Refresh Now"}
+          </button>
+
+          <label>
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) =>
+                setAutoRefresh(e.target.checked)
+              }
+            />
+            Auto Refresh (30s)
+          </label>
+        </div>
+      </section>
+
+      {error && (
+        <section className="panel error">
+          <h3>API Error</h3>
+          <p>{error}</p>
+          <p>
+            Verify the Next.js API route:
+            <br />
+            <code>/api/analysis</code>
           </p>
-
-          <div className="analysisRow">
-            <span>Selected Market</span>
-            <strong>{coin}USD</strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>Timeframe</span>
-            <strong>{timeframe}</strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>Completed Candles</span>
-            <strong>
-              {data?.candleCount ??
-                candles.length}
-            </strong>
-          </div>
-
-          <div className="analysisRow">
-            <span>API Connection</span>
-            <strong
-              style={{
-                color: error
-                  ? COLORS.red
-                  : data
-                  ? COLORS.green
-                  : COLORS.yellow,
-              }}
-            >
-              {error
-                ? "ERROR"
-                : data
-                ? "CONNECTED"
-                : "CONNECTING"}
-            </strong>
-          </div>
+          <p>
+            Expected parameters: coin=BTC and
+            timeframe=15m
+          </p>
         </section>
+      )}
 
-        <footer>
-          <p>
-            Educational technical analysis only.
-            Not financial advice.
+      <section className="panel">
+        <div className="sectionHeading">
+          <h3>Candlestick Chart</h3>
+          <span className="muted">
+            Support & Resistance
+          </span>
+        </div>
+
+        {data ? (
+          <CandlestickChart data={data} />
+        ) : (
+          <div className="empty">
+            {loading
+              ? "Loading candles..."
+              : "Candlestick data unavailable"}
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <h3>Support & Resistance Levels</h3>
+
+        <div className="metrics">
+          <Metric
+            label="Support"
+            value={
+              data ? `$${fmt(data.support)}` : "—"
+            }
+            color="#22c55e"
+          />
+
+          <Metric
+            label="Resistance"
+            value={
+              data
+                ? `$${fmt(data.resistance)}`
+                : "—"
+            }
+            color="#fb7185"
+          />
+
+          <Metric
+            label="Distance from Support"
+            value={
+              Number.isFinite(distanceSupport)
+                ? `${fmt(distanceSupport)}%`
+                : "—"
+            }
+          />
+
+          <Metric
+            label="Distance to Resistance"
+            value={
+              Number.isFinite(distanceResistance)
+                ? `${fmt(distanceResistance)}%`
+                : "—"
+            }
+          />
+        </div>
+      </section>
+
+      <section className="panel">
+        <h3>Technical Indicators</h3>
+
+        <div className="metrics">
+          <Metric
+            label="RSI (14)"
+            value={fmt(data?.rsi)}
+          />
+
+          <Metric
+            label="MACD Line"
+            value={fmt(data?.macd?.line, 4)}
+          />
+
+          <Metric
+            label="MACD Signal"
+            value={fmt(data?.macd?.signal, 4)}
+          />
+
+          <Metric
+            label="MACD Histogram"
+            value={fmt(data?.macd?.histogram, 4)}
+          />
+
+          <Metric
+            label="EMA 20"
+            value={fmt(data?.ema20)}
+          />
+
+          <Metric
+            label="EMA 50"
+            value={fmt(data?.ema50)}
+          />
+
+          <Metric
+            label="EMA Trend"
+            value={trend}
+          />
+
+          <Metric
+            label="Trading Signal"
+            value={data?.signal || "—"}
+            color={signalColor}
+          />
+        </div>
+      </section>
+
+      <section className="panel">
+        <h3>Signal Interpretation</h3>
+
+        {data ? (
+          <>
+            <p>
+              Current Signal:{" "}
+              <strong style={{ color: signalColor }}>
+                {data.signal}
+              </strong>
+            </p>
+
+            {data.signal === "LONG" && (
+              <p>
+                The API indicates a bullish setup.
+                Review trend confirmation and risk
+                before considering a position.
+              </p>
+            )}
+
+            {data.signal === "SHORT" && (
+              <p>
+                The API indicates a bearish setup.
+                Review trend confirmation and risk
+                before considering a position.
+              </p>
+            )}
+
+            {data.signal === "HOLD" && (
+              <p>
+                No clear directional entry is
+                indicated by the current API signal.
+              </p>
+            )}
+
+            <p className="muted">
+              Support: ${fmt(data.support)}
+              <br />
+              Resistance: ${fmt(data.resistance)}
+              <br />
+              EMA Trend: {trend}
+            </p>
+          </>
+        ) : (
+          <p className="muted">
+            Waiting for analysis...
           </p>
-          <p>
-            Signals are rule-based and not
-            guaranteed. No automatic trade
-            execution.
-          </p>
-          <p>
-            Delta Exchange India public market
-            data · Crypto Signal Pro
-          </p>
-        </footer>
-      </div>
+        )}
+      </section>
+
+      <footer>
+        Crypto Signal Pro · Educational technical
+        analysis only. Signals are not guaranteed.
+        No automatic trades are placed.
+      </footer>
 
       <style jsx>{`
         * {
@@ -956,328 +802,216 @@ export default function Home() {
 
         .page {
           min-height: 100vh;
-          background: ${COLORS.background};
-          color: ${COLORS.text};
-          padding: 18px 12px 40px;
-          font-family: Arial, Helvetica, sans-serif;
-        }
-
-        .container {
-          max-width: 1100px;
-          margin: 0 auto;
+          background: #091325;
+          color: #e2e8f0;
+          padding: 18px;
+          font-family: Arial, sans-serif;
         }
 
         .header {
-          margin-bottom: 22px;
+          max-width: 1100px;
+          margin: 0 auto 24px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          flex-wrap: wrap;
         }
 
         h1 {
-          font-size: clamp(25px, 5vw, 34px);
-          margin: 0 0 14px;
+          font-size: 28px;
+          margin: 0 0 8px;
         }
 
         h2 {
+          font-size: 34px;
+          margin: 12px 0;
+        }
+
+        h3 {
           font-size: 20px;
-          margin: 0 0 18px;
+          margin: 0 0 20px;
         }
 
         p {
           line-height: 1.6;
         }
 
-        .header p {
-          color: ${COLORS.muted};
-          margin: 6px 0;
+        .header p,
+        .muted {
+          color: #94a3b8;
         }
 
-        .small {
-          color: ${COLORS.muted};
+        .live {
+          color: #22c55e;
           font-size: 13px;
         }
 
-        .muted {
-          color: ${COLORS.muted};
-        }
-
-        .card {
-          background: ${COLORS.card};
-          border: 1px solid ${COLORS.border};
+        .panel {
+          max-width: 1100px;
+          margin: 0 auto 20px;
+          padding: 22px;
+          background: #17263c;
+          border: 1px solid #304560;
           border-radius: 18px;
-          padding: 20px;
-          margin-bottom: 18px;
-          overflow: hidden;
         }
 
-        .controlRow {
+        .controls,
+        .priceRow,
+        .sectionHeading,
+        .actions {
           display: flex;
-          justify-content: space-between;
           align-items: center;
+          justify-content: space-between;
+          gap: 12px;
           flex-wrap: wrap;
-          gap: 15px;
         }
 
         .coinButtons {
           display: flex;
-          gap: 8px;
+          gap: 10px;
         }
 
         button,
         select {
-          font: inherit;
-        }
-
-        .normalButton,
-        .activeButton {
-          border-radius: 11px;
-          border: 1px solid #415977;
-          padding: 12px 17px;
+          background: #233650;
           color: white;
+          border: 1px solid #38516f;
+          border-radius: 10px;
+          padding: 12px 18px;
+          font-size: 15px;
           cursor: pointer;
         }
 
-        .normalButton {
-          background: #20334e;
+        button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
-        .activeButton {
-          background: ${COLORS.blue};
-          border-color: #65b5ff;
-        }
-
-        .timeframeControl {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-
-        .timeframeControl label {
-          color: ${COLORS.text};
-        }
-
-        select {
-          background: #20334e;
-          color: white;
-          border: 1px solid #415977;
-          border-radius: 10px;
-          padding: 12px;
+        button.active {
+          background: #2563eb;
+          border-color: #60a5fa;
         }
 
         .priceRow {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-          margin-top: 30px;
+          margin-top: 28px;
         }
 
-        .bigPrice {
-          font-size: clamp(29px, 7vw, 46px);
-          font-weight: 800;
-          margin: 6px 0;
+        .signal {
+          border: 1px solid;
+          border-radius: 12px;
+          padding: 14px 20px;
+          font-size: 22px;
+          font-weight: bold;
+        }
+
+        .status {
+          color: #94a3b8;
+          font-size: 13px;
+          margin: 12px 0 20px;
+        }
+
+        .actions {
+          justify-content: flex-start;
+        }
+
+        .actions label {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          color: #cbd5e1;
+          font-size: 14px;
+        }
+
+        .metrics {
+          display: grid;
+          grid-template-columns:
+            repeat(4, minmax(0, 1fr));
+          gap: 14px;
+        }
+
+        .metric {
+          padding: 16px;
+          border-radius: 12px;
+          background: #101b2d;
+          border: 1px solid #29384e;
+          min-width: 0;
+        }
+
+        .metricValue {
+          font-size: 21px;
+          font-weight: bold;
+          margin-top: 10px;
           overflow-wrap: anywhere;
         }
 
-        .signalBadge {
-          background: #34445e;
-          padding: 12px 14px;
-          border-radius: 10px;
-          font-size: 19px;
-          font-weight: bold;
+        .error {
+          border-color: #ef4444;
+          color: #fda4af;
         }
 
-        .refreshRow {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 15px;
-          margin-top: 25px;
-        }
-
-        .checkLabel {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-
-        input[type="checkbox"] {
-          width: 18px;
-          height: 18px;
-          accent-color: ${COLORS.blue};
-        }
-
-        .refreshButton {
-          background: ${COLORS.blue};
-          color: white;
-          border: none;
-          border-radius: 10px;
-          padding: 12px 16px;
-          cursor: pointer;
-          font-weight: bold;
-        }
-
-        .refreshButton:disabled {
-          opacity: 0.65;
-        }
-
-        .sectionHeader {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .chartScroll {
-          width: 100%;
-          overflow-x: auto;
-        }
-
-        .chart {
-          display: block;
-          width: 100%;
-          min-width: 580px;
-          height: auto;
+        .error code {
+          overflow-wrap: anywhere;
         }
 
         .empty {
-          padding: 60px 10px;
+          min-height: 250px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #94a3b8;
           text-align: center;
-          color: ${COLORS.muted};
         }
 
         .legend {
           display: flex;
-          flex-wrap: wrap;
-          gap: 18px;
-          margin-top: 15px;
+          justify-content: center;
+          gap: 22px;
           font-size: 13px;
-          color: ${COLORS.muted};
-        }
-
-        .legend span {
-          display: flex;
-          align-items: center;
-          gap: 7px;
-        }
-
-        .legend i {
-          display: inline-block;
-          width: 18px;
-          height: 3px;
-        }
-
-        .metricGrid {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 14px;
-          margin-bottom: 18px;
-        }
-
-        .metric {
-          background: ${COLORS.card};
-          border: 1px solid ${COLORS.border};
-          border-radius: 16px;
-          padding: 18px;
-          min-width: 0;
-        }
-
-        .metricTitle {
-          color: ${COLORS.muted};
-          font-size: 14px;
-          margin-bottom: 12px;
-        }
-
-        .metricValue {
-          font-size: clamp(17px, 4.3vw, 27px);
-          font-weight: bold;
-          overflow-wrap: anywhere;
-        }
-
-        .innerGrid {
-          margin-bottom: 0;
-        }
-
-        .analysisRow {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-          padding: 13px 0;
-          border-bottom: 1px solid ${COLORS.border};
-          font-size: 14px;
-        }
-
-        .analysisRow:last-child {
-          border-bottom: none;
-        }
-
-        .analysisRow strong {
-          text-align: right;
-          overflow-wrap: anywhere;
-        }
-
-        .signalLarge {
-          font-size: 34px;
-          font-weight: 800;
-          margin-bottom: 8px;
-        }
-
-        .errorBox {
-          background: #351d2a;
-          color: #ffb3bb;
-          border: 1px solid ${COLORS.red};
-          border-radius: 14px;
-          padding: 16px;
-          margin-bottom: 18px;
-          overflow-wrap: anywhere;
-        }
-
-        .errorBox strong {
-          display: block;
-          margin-bottom: 8px;
+          padding: 12px;
         }
 
         footer {
+          max-width: 1100px;
+          margin: 25px auto;
+          color: #94a3b8;
           text-align: center;
-          color: ${COLORS.muted};
           font-size: 12px;
-          margin-top: 28px;
+          line-height: 1.6;
         }
 
-        @media (max-width: 500px) {
+        @media (max-width: 700px) {
           .page {
-            padding: 14px 10px 35px;
+            padding: 12px;
           }
 
-          .card {
-            padding: 15px;
+          .panel {
+            padding: 16px;
           }
 
-          .metric {
-            padding: 14px;
+          h1 {
+            font-size: 24px;
           }
 
-          .priceRow {
-            align-items: center;
+          h2 {
+            font-size: 28px;
           }
 
-          .signalBadge {
-            font-size: 16px;
+          .metrics {
+            grid-template-columns:
+              repeat(2, minmax(0, 1fr));
           }
 
-          .timeframeControl {
-            font-size: 14px;
+          .metricValue {
+            font-size: 17px;
           }
 
-          .chart {
-            min-width: 580px;
+          .controls {
+            align-items: stretch;
           }
-        }
 
-        @media (min-width: 800px) {
-          .metricGrid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+          select {
+            max-width: 100%;
           }
         }
       `}</style>
