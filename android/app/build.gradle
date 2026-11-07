@@ -1,0 +1,33 @@
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.cryptosignalpro.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.cryptosignalpro.app'
+
+        minSdk 24
+        targetSdk 35
+
+        versionCode 10
+        versionName "10.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            debuggable true
+        }
+    }
+}
